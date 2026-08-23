@@ -18,11 +18,16 @@
 
 #include <UI/UltraCanvas/Application.h>
 #include <UI/UltraCanvas/BrowserWindow.h>
+#include <UI/UltraCanvas/GeolocationProvider.h>
 #include <UI/UltraCanvas/WebViewController.h>
 
 ErrorOr<int> ladybird_main(Main::Arguments arguments)
 {
     auto app = TRY(Ladybird::Application::create(arguments));
+
+    // Register a geolocation provider so navigator.geolocation requests get a deliberate
+    // response (currently PermissionDenied) instead of relying on the missing platform default.
+    Ladybird::install_ultracanvas_geolocation_provider();
 
     // Default to a search engine so non-URL text typed in the address bar performs a web search.
     // Only set it when the user hasn't already chosen one (persisted in Settings.json and

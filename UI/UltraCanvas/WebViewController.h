@@ -17,10 +17,12 @@
 #include <AK/Function.h>
 #include <AK/String.h>
 #include <AK/StringView.h>
+#include <cstdint>
 #include <memory>
 
 namespace UltraCanvas {
 class UltraCanvasUIElement;
+class UCImageRaster;
 }
 
 namespace Ladybird {
@@ -55,6 +57,15 @@ public:
     // Bookmark (or un-bookmark) the current page.
     virtual void toggle_bookmark() = 0;
 
+    // Capture the current page as a thumbnail image no larger than max_w x max_h (preserving aspect
+    // ratio), for the tab hover preview. Returns null if no frame has been painted yet.
+    virtual std::shared_ptr<UltraCanvas::UCImageRaster> capture_thumbnail(int max_w, int max_h) = 0;
+
+    // Toggle the mute state of this page's audio. The chrome reflects the new state via
+    // on_audio_play_state_changed, which is fired immediately after the toggle (the engine
+    // only fires it on play-state changes, not on mute changes).
+    virtual void toggle_mute() = 0;
+
     // Set the on-screen size of the web view, in window (logical) pixels. Called by
     // the chrome from the authoritative X11 window size (initially and on resize) —
     // the view must NOT derive this from its own laid-out width, which feeds back
@@ -74,6 +85,11 @@ public:
     // (both 0 when there are no matches).
     Function<void(size_t current, size_t total)> on_find_result;
 
+    // The page's audio state changed. `playing` is true while audio is actively playing;
+    // `muted` reflects the page's mute state. The chrome shows a speaker/mute badge on the
+    // tab when audio is playing or the page is muted.
+    Function<void(bool playing, bool muted)> on_audio_play_state_changed;
+
     // Window manipulation requested by the page (Fullscreen API, window.moveTo/resizeTo,
     // window.minimize etc.). The view forwards these to the chrome, which drives the
     // top-level UltraCanvas window (only the active tab should act on them).
@@ -88,6 +104,15 @@ public:
     // The hovered link's URL changed. Non-empty => show it (status display); empty => nothing
     // is hovered, hide the display.
     Function<void(String url)> on_link_hover_change;
+
+    // The page acquired/released a screen wake lock (Screen Wake Lock API). The chrome shows an
+    // indicator while any active tab holds one.
+    Function<void(bool locked)> on_wake_lock_change;
+
+    // The page requests a tooltip (e.g. a title attribute) at content coordinates, or asks to hide
+    // the current one. Distinct from on_link_hover_change (which is the status-bar URL display).
+    Function<void(int content_x, int content_y, String text)> on_tooltip_override;
+    Function<void()> on_tooltip_override_end;
 };
 
 // The view exposed as both its control interface and its UltraCanvas element (for

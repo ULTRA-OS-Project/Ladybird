@@ -69,6 +69,11 @@ private:
     virtual void open_url_in_new_window(URL::URL const&, WebView::IsPrivate) override; // non-const in the base
     virtual Optional<WebView::ViewImplementation&> open_blank_new_tab(Web::HTML::ActivateTab) const override;
 
+    // DevTools server state changes: forward to the chrome (via DevTools.h) so it shows/hides
+    // the DevTools banner.
+    virtual void on_devtools_enabled() const override;
+    virtual void on_devtools_disabled() const override;
+
     // Private browsing is supported (private windows use a private WebContent client). Enabling
     // this makes the engine's "Open in New Private Window" context-menu action visible.
     virtual bool supports_private_browsing_windows() const override { return true; }

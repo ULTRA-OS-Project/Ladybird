@@ -53,7 +53,10 @@ target_sources(ladybird PRIVATE
     Application.cpp
     Autocomplete.cpp
     Bookmarks.cpp
+    DevTools.cpp
     Downloads.cpp
+    GeolocationProvider.cpp
+    Settings.cpp
     EventLoopImplementationUltraCanvas.cpp
     UltraCanvasPlatform.cpp
     WebContentView.cpp

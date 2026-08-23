@@ -14,6 +14,8 @@
 #include <LibGfx/Bitmap.h>
 #include <LibGfx/Cursor.h>
 #include <LibGfx/Rect.h>
+#include <LibGfx/ImageFormats/PNGWriter.h>
+#include <LibGfx/ScalingMode.h>
 #include <LibGfx/SharedImageBuffer.h>
 #include <LibGfx/SystemTheme.h>
 #include <LibURL/URL.h>
@@ -23,6 +25,7 @@
 #include <LibWeb/UIEvents/MouseButton.h>
 #include <LibWeb/HTML/ColorPickerUpdateState.h>
 #include <LibWeb/HTML/SelectedFile.h>
+#include <LibWeb/Page/ScreenWakeLockHandle.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/Menu.h>
 #include <LibWebView/URL.h>
@@ -37,6 +40,7 @@
 #include <cairo/cairo.h>
 
 #include <UltraCanvasEvent.h>
+#include <UltraCanvasImage.h>
 #include <UltraCanvasRenderContext.h>
 #include <UltraCanvasUIElement.h>
 
@@ -296,6 +300,26 @@ public:
         on_link_hover = [this](URL::URL const& url) { if (WebViewController::on_link_hover_change) WebViewController::on_link_hover_change(url.serialize()); };
         on_link_unhover = [this] { if (WebViewController::on_link_hover_change) WebViewController::on_link_hover_change(String {}); };
 
+        ViewImplementation::on_audio_play_state_changed = [this](Web::HTML::AudioPlayState) { notify_audio_state(); };
+
+        ViewImplementation::on_screen_wake_lock_state_changed = [this](Web::ScreenWakeLockState state) {
+            if (WebViewController::on_wake_lock_change)
+                WebViewController::on_wake_lock_change(state == Web::ScreenWakeLockState::Acquired);
+        };
+        on_request_tooltip_override = [this](Gfx::IntPoint position, ByteString const& tooltip) {
+            if (WebViewController::on_tooltip_override)
+                WebViewController::on_tooltip_override(position.x(), position.y(), MUST(String::from_byte_string(tooltip)));
+        };
+        on_stop_tooltip_override = [this] {
+            if (WebViewController::on_tooltip_override_end)
+                WebViewController::on_tooltip_override_end();
+        };
+        on_input_method_state_change = [] {
+            // UltraCanvas manages composition/caret inside its text-input element (see OnEvent) and
+            // exposes no separate platform input-context to notify, so there is nothing to do here.
+            // Wired explicitly to document that this hook is intentionally a no-op for UltraCanvas.
+        };
+
         // Reflect the page's hover cursor (pointer over links, I-beam over text, ...).
         // SetMouseCursor() is X11-free; the UltraCanvas app applies the hovered
         // element's cursor to the native window on the next pointer update.
@@ -508,6 +532,43 @@ public:
     virtual void find_previous() override { find_in_page_previous_match(); }
     virtual void stop_find() override { ViewImplementation::find_in_page(Utf16String {}); }
     virtual void toggle_bookmark() override { WebView::Application::the().toggle_bookmark_for_view(*this); }
+    virtual std::shared_ptr<UltraCanvas::UCImageRaster> capture_thumbnail(int max_w, int max_h) override
+    {
+        // Use the latest painted frame (front buffer, or the retained backup for a hidden/background
+        // tab). Scale it down and re-encode as PNG so UCImageRaster can load it (it has no raw-pixel
+        // constructor). Only happens on hover, so the per-call PNG round-trip is fine.
+        Gfx::SharedImageBuffer const* image_buffer = nullptr;
+        if (m_client_state.has_usable_bitmap)
+            image_buffer = m_client_state.front_bitmap.shared_image_buffer.ptr();
+        else if (m_backup_shared_image_buffer)
+            image_buffer = m_backup_shared_image_buffer.ptr();
+        if (!image_buffer)
+            return nullptr;
+        auto bitmap = image_buffer->bitmap();
+        int sw = bitmap->width();
+        int sh = bitmap->height();
+        if (sw <= 0 || sh <= 0 || max_w <= 0 || max_h <= 0)
+            return nullptr;
+        double scale = min(static_cast<double>(max_w) / sw, static_cast<double>(max_h) / sh);
+        if (scale > 1.0)
+            scale = 1.0;
+        int tw = max(1, static_cast<int>(sw * scale));
+        int th = max(1, static_cast<int>(sh * scale));
+        auto scaled = bitmap->scaled(tw, th, Gfx::ScalingMode::Bilinear);
+        if (scaled.is_error())
+            return nullptr;
+        auto png = Gfx::PNGWriter::encode(*scaled.value());
+        if (png.is_error())
+            return nullptr;
+        return UltraCanvas::UCImageRaster::LoadFromMemory(png.value().data(), png.value().size());
+    }
+    virtual void toggle_mute() override
+    {
+        toggle_page_mute_state();
+        // The engine only fires on_audio_play_state_changed when the play state changes, not
+        // when mute toggles — so push the new state to the chrome ourselves.
+        notify_audio_state();
+    }
 
     virtual void set_visible(bool visible) override
     {
@@ -651,6 +712,16 @@ public:
     virtual Gfx::IntPoint to_widget_position(Gfx::IntPoint content_position) const override { return content_position; }
 
 private:
+    // Push the current audio play/mute state to the chrome (tab badge + mute menu label).
+    void notify_audio_state()
+    {
+        if (!WebViewController::on_audio_play_state_changed)
+            return;
+        bool playing = audio_play_state() == Web::HTML::AudioPlayState::Playing;
+        bool muted = page_mute_state() == Web::HTML::MuteState::Muted;
+        WebViewController::on_audio_play_state_changed(playing, muted);
+    }
+
     // Load the bundled default theme and hand it to WebContent so the page palette (and thus
     // the default text-selection color) is populated. Best-effort: on failure the selection
     // simply stays as it was, so a missing resource never breaks page loading.

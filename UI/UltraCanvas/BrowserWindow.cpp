@@ -14,13 +14,16 @@
 #include <UI/UltraCanvas/Autocomplete.h>
 #include <UI/UltraCanvas/BrowserWindow.h>
 #include <UI/UltraCanvas/Bookmarks.h>
+#include <UI/UltraCanvas/DevTools.h>
 #include <UI/UltraCanvas/Downloads.h>
+#include <UI/UltraCanvas/Settings.h>
 #include <UI/UltraCanvas/UltraCanvasPlatform.h>
 
 #include <UltraCanvasAutoComplete.h>
 #include <UltraCanvasButton.h>
 #include <UltraCanvasClipboard.h>
 #include <UltraCanvasImage.h>
+#include <UltraCanvasImageElement.h>
 #include <UltraCanvasLabel.h>
 #include <UltraCanvasMenu.h>
 #include <UltraCanvasTabbedContainer.h>
@@ -39,6 +42,12 @@ static constexpr int TOOLBAR_HEIGHT = 40;
 static constexpr int TAB_STRIP_HEIGHT = 32; // UltraCanvasTabbedContainer default tabHeight
 static constexpr int FIND_BAR_HEIGHT = 36;
 static constexpr int BOOKMARKS_BAR_HEIGHT = 30;
+static constexpr int DEVTOOLS_BANNER_HEIGHT = 30;
+static constexpr int MENU_BAR_HEIGHT = 28;
+static constexpr int TAB_PREVIEW_WIDTH = 240;
+static constexpr int TAB_PREVIEW_HEIGHT = 150;
+static constexpr int TAB_PREVIEW_BORDER_WIDTH = 2;
+static constexpr int TAB_PREVIEW_GAP = 18; // vertical gap between the tab strip and the preview
 
 static std::string to_std_string(String const& string)
 {
@@ -126,6 +135,12 @@ public:
         // loading finishes (the loading spinner overrides it while loading == true).
         std::shared_ptr<UltraCanvas::UCImage> favicon;
         bool loading { false };
+        // Audio state, used to show a speaker/mute badge on the tab and to label the
+        // Mute/Unmute context-menu item.
+        bool audio_playing { false };
+        bool muted { false };
+        // Whether the page currently holds a screen wake lock (drives the toolbar indicator).
+        bool wake_locked { false };
     };
 
     std::shared_ptr<UltraCanvas::UltraCanvasWindow> window;
@@ -143,7 +158,11 @@ public:
     bool suppress_inline_completion { false };
     // Toolbar downloads button; shown with a count while downloads are active.
     std::shared_ptr<UltraCanvas::UltraCanvasButton> downloads_button;
+    // Toolbar indicator shown while the active tab holds a screen wake lock.
+    std::shared_ptr<UltraCanvas::UltraCanvasLabel> wake_lock_indicator;
     std::shared_ptr<UltraCanvas::UltraCanvasTabbedContainer> tab_container;
+    // Floating thumbnail shown under a tab on hover (absolute-positioned window overlay).
+    std::shared_ptr<UltraCanvas::UltraCanvasImageElement> tab_preview;
     // Find-in-page bar (below the toolbar), hidden until Ctrl+F.
     std::shared_ptr<UltraCanvas::UltraCanvasToolbar> find_bar;
     std::shared_ptr<UltraCanvas::UltraCanvasTextInput> find_input;
@@ -151,8 +170,21 @@ public:
     // Bookmarks bar (row of bookmark buttons, between the toolbar and find bar); visibility
     // follows the "Show bookmarks bar" setting.
     std::shared_ptr<UltraCanvas::UltraCanvasToolbar> bookmarks_bar;
+    // DevTools banner (top strip, shown only while the DevTools server is enabled): a label with
+    // the port plus "Open Client" / "Disable" buttons.
+    std::shared_ptr<UltraCanvas::UltraCanvasToolbar> devtools_banner;
+    std::shared_ptr<UltraCanvas::UltraCanvasLabel> devtools_label;
+    // Whether the DevTools server is currently enabled (drives the banner and the Inspect menu
+    // "Enable/Disable DevTools" label). Kept in sync via the process-wide state callback.
+    bool devtools_enabled { false };
     // The "hamburger" menu (Settings / Bookmarks / History / Downloads), kept alive while open.
     std::shared_ptr<UltraCanvas::UltraCanvasMenu> main_menu;
+    // Traditional top menu bar (File / View / Bookmarks / History / Inspect). Persistent window
+    // child; its submenus are provider-backed so they reflect current state when opened.
+    std::shared_ptr<UltraCanvas::UltraCanvasMenu> menu_bar;
+    // The downloads popover menu (list of downloads + per-item pause/resume/cancel/open), kept
+    // alive while shown.
+    std::shared_ptr<UltraCanvas::UltraCanvasMenu> downloads_menu;
     // Popups spawned from the bookmarks bar (folder dropdown / right-click menu), kept alive
     // while shown.
     std::shared_ptr<UltraCanvas::UltraCanvasMenu> bookmark_folder_popup;
@@ -170,6 +202,9 @@ public:
     std::vector<std::string> closed_tab_urls;
     // Find bar "match case" toggle state.
     bool find_case_sensitive { false };
+    // Last known window geometry, persisted across launches (see Settings.h). Updated in-memory
+    // on move/resize and written out on maximize/restore/close.
+    WindowGeometry window_geometry;
 
     int active_index() const { return tab_container ? tab_container->GetActiveTab() : -1; }
 
@@ -195,6 +230,17 @@ public:
     // Apply the correct tab icon for tabs[index]: the loading spinner while loading, otherwise
     // the page favicon (or the default globe).
     void apply_tab_icon(int index);
+    // Show a speaker (playing) or muted-speaker badge on tabs[index] when it has audio, or
+    // clear the badge when it is silent and unmuted.
+    void apply_tab_audio_badge(int index);
+    // Show the hover thumbnail for the tab at `index` (index < 0 hides it).
+    void show_tab_preview(int index);
+    // Show/hide the toolbar wake-lock indicator based on the active tab's wake_locked flag.
+    void apply_wake_lock_indicator();
+    // Update window_geometry from the live window (in-memory only; call save_window_geometry to
+    // persist). Only captures position/size while the window is in its normal state so a
+    // maximized/fullscreen window doesn't overwrite the restore size.
+    void capture_window_geometry();
     void relayout();
     void close_active_tab();
     void reopen_closed_tab(); // Ctrl+Shift+T: reopen the most-recently-closed tab
@@ -210,9 +256,16 @@ public:
     void erase_tab(int index);          // remove a tab without the last-tab-closes-window rule
     void open_file();                       // native open dialog -> load the chosen file
     void update_downloads_button();         // refresh the toolbar downloads button label/visibility
+    void show_downloads_popover();          // list downloads with per-item pause/resume/cancel/open
     void toggle_find_bar(bool show);
     void open_internal_page(char const* about_url);
     void show_main_menu();
+    void build_menu_bar();                  // populate the persistent top menu bar
+    std::vector<UltraCanvas::MenuItemData> build_view_menu_items();      // shared by menu bar + hamburger
+    std::vector<UltraCanvas::MenuItemData> build_bookmarks_menu_items(); // shared by menu bar + hamburger
+    std::vector<UltraCanvas::MenuItemData> build_inspect_menu_items();   // shared by menu bar + hamburger
+    // Update the DevTools banner label/visibility from devtools_enabled + port, then relayout.
+    void apply_devtools_banner(int port);
 
     // Bookmarks.
     void rebuild_bookmarks_bar();
@@ -287,6 +340,17 @@ void BrowserWindowState::add_tab(WebViewHandle handle, bool activate)
             state->tabs[index].loading = loading;
             state->apply_tab_icon(index);
         };
+        raw_controller->on_audio_play_state_changed = [self, raw_controller](bool playing, bool muted) {
+            auto state = self.lock();
+            if (!state)
+                return;
+            auto index = state->index_of(raw_controller);
+            if (index < 0)
+                return;
+            state->tabs[index].audio_playing = playing;
+            state->tabs[index].muted = muted;
+            state->apply_tab_audio_badge(index);
+        };
         raw_controller->on_find_result = [self, raw_controller](size_t current, size_t total) {
             auto state = self.lock();
             if (!state || !state->find_label)
@@ -295,6 +359,18 @@ void BrowserWindowState::add_tab(WebViewHandle handle, bool activate)
             if (state->active_controller() != raw_controller)
                 return;
             state->find_label->SetText(std::to_string(current) + "/" + std::to_string(total));
+        };
+
+        raw_controller->on_wake_lock_change = [self, raw_controller](bool locked) {
+            auto state = self.lock();
+            if (!state)
+                return;
+            auto index = state->index_of(raw_controller);
+            if (index < 0)
+                return;
+            state->tabs[index].wake_locked = locked;
+            if (index == state->active_index())
+                state->apply_wake_lock_indicator();
         };
 
         // Window manipulation from the page (Fullscreen API, window.moveTo/resizeTo, minimize…).
@@ -322,6 +398,27 @@ void BrowserWindowState::add_tab(WebViewHandle handle, bool activate)
             s->window->GetWindowSize(w, h);
             UltraCanvas::UltraCanvasTooltipManager::UpdateAndShowTooltipImmediately(
                 s->window.get(), to_std_string(url), UltraCanvas::Point2Di(8, h - 30));
+        };
+
+        // Page-requested tooltip (title attribute etc.). Position is in web-content coordinates, so
+        // offset by the chrome height above the tab content. Active tab only.
+        raw_controller->on_tooltip_override = [self, raw_controller](int content_x, int content_y, String text) {
+            auto s = self.lock();
+            if (!s || s->active_controller() != raw_controller)
+                return;
+            int mb_h = (s->menu_bar && s->menu_bar->IsVisible()) ? MENU_BAR_HEIGHT : 0;
+            int dt_h = (s->devtools_banner && s->devtools_banner->IsVisible()) ? DEVTOOLS_BANNER_HEIGHT : 0;
+            int bm_h = (s->bookmarks_bar && s->bookmarks_bar->IsVisible()) ? BOOKMARKS_BAR_HEIGHT : 0;
+            int find_h = (s->find_bar && s->find_bar->IsVisible()) ? FIND_BAR_HEIGHT : 0;
+            int content_top = mb_h + TOOLBAR_HEIGHT + dt_h + bm_h + find_h + TAB_STRIP_HEIGHT;
+            UltraCanvas::UltraCanvasTooltipManager::UpdateAndShowTooltipImmediately(
+                s->window.get(), to_std_string(text), UltraCanvas::Point2Di(content_x, content_y + content_top));
+        };
+        raw_controller->on_tooltip_override_end = [self, raw_controller] {
+            auto s = self.lock();
+            if (!s || s->active_controller() != raw_controller)
+                return;
+            UltraCanvas::UltraCanvasTooltipManager::HideTooltipImmediately();
         };
     }
 
@@ -352,15 +449,107 @@ void BrowserWindowState::apply_tab_icon(int index)
     }
 }
 
+void BrowserWindowState::apply_tab_audio_badge(int index)
+{
+    if (index < 0 || index >= static_cast<int>(tabs.size()))
+        return;
+    auto& tab = tabs[index];
+    // Muted takes visual priority over playing: a muted tab shows the crossed-out speaker
+    // even while audio is (silently) playing. A silent, unmuted tab shows no badge.
+    if (tab.muted)
+        tab_container->SetTabBadge(index, "\xF0\x9F\x94\x87", true); // 🔇
+    else if (tab.audio_playing)
+        tab_container->SetTabBadge(index, "\xF0\x9F\x94\x8A", true); // 🔊
+    else
+        tab_container->ClearTabBadge(index);
+}
+
+void BrowserWindowState::show_tab_preview(int index)
+{
+    if (!tab_preview)
+        return;
+    if (index < 0 || index >= static_cast<int>(tabs.size())) {
+        tab_preview->SetVisible(false);
+        return;
+    }
+    auto* controller = tabs[index].view.controller.get();
+    if (!controller) {
+        tab_preview->SetVisible(false);
+        return;
+    }
+    auto thumb = controller->capture_thumbnail(TAB_PREVIEW_WIDTH, TAB_PREVIEW_HEIGHT);
+    if (!thumb) {
+        tab_preview->SetVisible(false);
+        return;
+    }
+    tab_preview->LoadFromImage(thumb);
+
+    // Position the preview just below the tab strip, aligned to the hovered tab, clamped to the
+    // window width. The tab strip sits directly below the chrome bars.
+    int mb_h = (menu_bar && menu_bar->IsVisible()) ? MENU_BAR_HEIGHT : 0;
+    int dt_h = (devtools_banner && devtools_banner->IsVisible()) ? DEVTOOLS_BANNER_HEIGHT : 0;
+    int bm_h = (bookmarks_bar && bookmarks_bar->IsVisible()) ? BOOKMARKS_BAR_HEIGHT : 0;
+    int find_h = (find_bar && find_bar->IsVisible()) ? FIND_BAR_HEIGHT : 0;
+    // Drop the preview a few pixels below the tab strip so it never overlaps the tabs — an overlap
+    // lets the topmost preview steal the tabs' hover events and flicker.
+    int strip_bottom = mb_h + TOOLBAR_HEIGHT + dt_h + bm_h + find_h + TAB_STRIP_HEIGHT + TAB_PREVIEW_GAP;
+
+    auto bounds = tab_container->GetTabBounds(index);
+    int w = 0, h = 0;
+    window->GetWindowSize(w, h);
+    int px = bounds.x;
+    if (px + TAB_PREVIEW_WIDTH > w)
+        px = w - TAB_PREVIEW_WIDTH;
+    if (px < 0)
+        px = 0;
+
+    // Use SetElementAbsolutePosition, not SetPosition: SetPosition only writes finalBounds, which
+    // the layout engine overwrites from layoutItem.position each pass (leaving the preview pinned at
+    // its construction origin ~0,0). SetElementAbsolutePosition sets the CSS top/left insets the
+    // layout engine honours. Positioning it below the tab strip also stops it overlapping (and thus
+    // stealing hover events from) the tabs, which was the flicker source.
+    tab_preview->SetElementAbsolutePosition(UltraCanvas::Point2Df(static_cast<float>(px), static_cast<float>(strip_bottom)));
+    tab_preview->SetVisible(true);
+}
+
+void BrowserWindowState::apply_wake_lock_indicator()
+{
+    if (!wake_lock_indicator)
+        return;
+    int active = active_index();
+    bool locked = active >= 0 && active < static_cast<int>(tabs.size()) && tabs[active].wake_locked;
+    wake_lock_indicator->SetVisible(locked);
+}
+
+void BrowserWindowState::capture_window_geometry()
+{
+    if (!window)
+        return;
+    window_geometry.maximized = window->IsMaximized();
+    if (!window->IsMaximized() && !window->IsFullscreen() && !window->IsMinimized()) {
+        int x = 0, y = 0, w = 0, h = 0;
+        window->GetWindowPosition(x, y);
+        window->GetWindowSize(w, h);
+        if (w > 0 && h > 0) {
+            window_geometry.x = x;
+            window_geometry.y = y;
+            window_geometry.width = w;
+            window_geometry.height = h;
+        }
+    }
+}
+
 void BrowserWindowState::on_active_changed()
 {
     auto active = active_index();
     int w = 0, h = 0;
     window->GetWindowSize(w, h);
+    int mb_h = (menu_bar && menu_bar->IsVisible()) ? MENU_BAR_HEIGHT : 0;
+    int dt_h = (devtools_banner && devtools_banner->IsVisible()) ? DEVTOOLS_BANNER_HEIGHT : 0;
     int bm_h = (bookmarks_bar && bookmarks_bar->IsVisible()) ? BOOKMARKS_BAR_HEIGHT : 0;
     int find_h = (find_bar && find_bar->IsVisible()) ? FIND_BAR_HEIGHT : 0;
     int content_width = w;
-    int content_height = h - TOOLBAR_HEIGHT - TAB_STRIP_HEIGHT - bm_h - find_h;
+    int content_height = h - TOOLBAR_HEIGHT - TAB_STRIP_HEIGHT - mb_h - dt_h - bm_h - find_h;
 
     for (size_t i = 0; i < tabs.size(); ++i) {
         bool is_active = static_cast<int>(i) == active;
@@ -370,6 +559,8 @@ void BrowserWindowState::on_active_changed()
                 controller->set_viewport_size(content_width, content_height);
         }
     }
+
+    apply_wake_lock_indicator();
 
     if (active >= 0 && active < static_cast<int>(tabs.size())) {
         window->SetWindowTitle(tabs[active].title.empty() ? std::string { "Ladybird" } : tabs[active].title);
@@ -414,19 +605,26 @@ void BrowserWindowState::relayout()
     using UltraCanvas::CSSLayout::Dimension;
     int w = 0, h = 0;
     window->GetWindowSize(w, h);
-    // The bookmarks bar and find bar only occupy space while visible; when hidden their height
-    // collapses to 0 so the tab content fills the window.
+    // The menu bar, DevTools banner, bookmarks bar and find bar only occupy space while visible;
+    // when hidden their height collapses to 0 so the tab content fills the window.
+    int mb_h = (menu_bar && menu_bar->IsVisible()) ? MENU_BAR_HEIGHT : 0;
+    int dt_h = (devtools_banner && devtools_banner->IsVisible()) ? DEVTOOLS_BANNER_HEIGHT : 0;
     int bm_h = (bookmarks_bar && bookmarks_bar->IsVisible()) ? BOOKMARKS_BAR_HEIGHT : 0;
     int find_h = (find_bar && find_bar->IsVisible()) ? FIND_BAR_HEIGHT : 0;
+    int chrome_h = mb_h + TOOLBAR_HEIGHT + dt_h + bm_h + find_h;
 
+    if (menu_bar)
+        menu_bar->SetElementSize(Dimension::Px(static_cast<float>(w)), Dimension::Px(static_cast<float>(mb_h)));
+    if (devtools_banner)
+        devtools_banner->SetElementSize(Dimension::Px(static_cast<float>(w)), Dimension::Px(static_cast<float>(dt_h)));
     toolbar->SetElementSize(Dimension::Px(static_cast<float>(w)), Dimension::Px(static_cast<float>(TOOLBAR_HEIGHT)));
     if (bookmarks_bar)
         bookmarks_bar->SetElementSize(Dimension::Px(static_cast<float>(w)), Dimension::Px(static_cast<float>(bm_h)));
     if (find_bar)
         find_bar->SetElementSize(Dimension::Px(static_cast<float>(w)), Dimension::Px(static_cast<float>(find_h)));
-    tab_container->SetElementSize(Dimension::Px(static_cast<float>(w)), Dimension::Px(static_cast<float>(h - TOOLBAR_HEIGHT - bm_h - find_h)));
+    tab_container->SetElementSize(Dimension::Px(static_cast<float>(w)), Dimension::Px(static_cast<float>(h - chrome_h)));
     if (auto* controller = active_controller())
-        controller->set_viewport_size(w, h - TOOLBAR_HEIGHT - TAB_STRIP_HEIGHT - bm_h - find_h);
+        controller->set_viewport_size(w, h - chrome_h - TAB_STRIP_HEIGHT);
 }
 
 void BrowserWindowState::toggle_find_bar(bool show)
@@ -570,6 +768,11 @@ void BrowserWindowState::show_tab_context_menu(int index, int window_x, int wind
     int count = static_cast<int>(tabs.size());
     tab_context_menu->AddItem(MenuItemData::Action("Reload", [self, index] { if (auto s = self.lock()) if (auto* c = s->controller_at(index)) c->reload(); }));
     tab_context_menu->AddItem(MenuItemData::Action("Duplicate Tab", [self, index] { if (auto s = self.lock()) s->duplicate_tab(index); }));
+    // Offer mute/unmute only for tabs that currently have audio or are already muted.
+    if (tabs[index].audio_playing || tabs[index].muted) {
+        char const* label = tabs[index].muted ? "Unmute Tab" : "Mute Tab";
+        tab_context_menu->AddItem(MenuItemData::Action(label, [self, index] { if (auto s = self.lock()) if (auto* c = s->controller_at(index)) c->toggle_mute(); }));
+    }
     tab_context_menu->AddItem(MenuItemData::Separator());
     tab_context_menu->AddItem(MenuItemData::Action("Move to Start", [self, index] { if (auto s = self.lock()) s->move_tab(index, 0); }));
     tab_context_menu->AddItem(MenuItemData::Action("Move to End", [self, index] { if (auto s = self.lock()) s->move_tab(index, static_cast<int>(s->tabs.size()) - 1); }));
@@ -623,6 +826,74 @@ void BrowserWindowState::update_downloads_button()
     }
 }
 
+void BrowserWindowState::show_downloads_popover()
+{
+    using UltraCanvas::MenuItemData;
+    auto self = weak_from_this();
+    if (!downloads_menu) {
+        downloads_menu = std::make_shared<UltraCanvas::UltraCanvasMenu>("downloads-popover");
+        downloads_menu->SetMenuType(UltraCanvas::MenuType::PopupMenu);
+    }
+    downloads_menu->Clear();
+
+    auto entries = download_entries();
+    if (entries.empty()) {
+        auto empty = MenuItemData::Action("No downloads", [] { });
+        empty.enabled = false;
+        downloads_menu->AddItem(empty);
+    } else {
+        for (auto const& entry : entries) {
+            // Build a one-line status: "45%" while downloading with a known size, otherwise a word.
+            std::string status;
+            switch (entry.state) {
+            case DownloadState::InProgress:
+                if (entry.has_total && entry.total > 0)
+                    status = std::to_string(entry.downloaded * 100 / entry.total) + "%";
+                else
+                    status = "Downloading";
+                break;
+            case DownloadState::Paused:
+                status = "Paused";
+                break;
+            case DownloadState::Completed:
+                status = "Completed";
+                break;
+            case DownloadState::Canceled:
+                status = "Canceled";
+                break;
+            case DownloadState::Failed:
+                status = "Failed";
+                break;
+            }
+
+            uint64_t id = entry.id;
+            std::vector<MenuItemData> actions;
+            if (entry.state == DownloadState::InProgress)
+                actions.push_back(MenuItemData::Action("Pause", [id] { pause_download(id); }));
+            if (entry.state == DownloadState::Paused && entry.can_resume)
+                actions.push_back(MenuItemData::Action("Resume", [id] { resume_download(id); }));
+            if (entry.state == DownloadState::InProgress || entry.state == DownloadState::Paused)
+                actions.push_back(MenuItemData::Action("Cancel", [id] { cancel_download(id); }));
+            if (entry.state == DownloadState::Completed)
+                actions.push_back(MenuItemData::Action("Open", [id] { open_download_file(id); }));
+            actions.push_back(MenuItemData::Action("Open Containing Folder", [id] { open_download_folder(id); }));
+
+            downloads_menu->AddItem(MenuItemData::Submenu(entry.display_name + " \xE2\x80\x94 " + status, actions));
+        }
+    }
+
+    downloads_menu->AddItem(MenuItemData::Separator());
+    downloads_menu->AddItem(MenuItemData::Action("Open Downloads Page", [self] { if (auto s = self.lock()) s->open_internal_page("about:downloads"); }));
+
+    int w = 0, h = 0;
+    window->GetWindowSize(w, h);
+    UltraCanvas::PopupElementSettings settings;
+    settings.closeByEscapeKey = true;
+    settings.closeByClickOutside = true;
+    // Drop the popover just under the toolbar, near the downloads button (right side).
+    downloads_menu->OpenMenu(UltraCanvas::Point2Di(w - 220, TOOLBAR_HEIGHT), *window, settings);
+}
+
 void BrowserWindowState::open_internal_page(char const* about_url)
 {
     // Settings/Bookmarks/History/Downloads are internal pages rendered by WebContent; open
@@ -654,23 +925,45 @@ void BrowserWindowState::show_main_menu()
     main_menu->AddItem(MenuItemData::ActionWithShortcut("Open File...", "Ctrl+O", [self] { if (auto s = self.lock()) s->open_file(); }));
     main_menu->AddItem(MenuItemData::Separator());
 
-    // Bookmarks submenu: Manage / Add / Bookmark All Tabs / Show Bar, then the bookmark list.
-    std::vector<MenuItemData> bookmarks_submenu;
-    bookmarks_submenu.push_back(MenuItemData::Action("Manage Bookmarks", [self] { if (auto s = self.lock()) s->open_internal_page("about:bookmarks"); }));
-    bookmarks_submenu.push_back(MenuItemData::Separator());
-    bookmarks_submenu.push_back(MenuItemData::ActionWithShortcut("Add Bookmark", "Ctrl+D", [self] { if (auto s = self.lock()) if (auto* c = s->active_controller()) c->toggle_bookmark(); }));
-    bookmarks_submenu.push_back(MenuItemData::ActionWithShortcut("Bookmark All Tabs...", "Ctrl+Shift+D", [self] { if (auto s = self.lock()) s->bookmark_all_tabs(); }));
-    bookmarks_submenu.push_back(MenuItemData::Checkbox("Show Bookmarks Bar", bookmarks_bar_visible(), [](bool checked) { set_bookmarks_bar_visible(checked); }));
-    bookmarks_submenu.push_back(MenuItemData::Separator());
-    for (auto& item : build_bookmark_menu_items(get_bookmarks()))
-        bookmarks_submenu.push_back(item);
-    main_menu->AddItem(MenuItemData::Submenu("Bookmarks", bookmarks_submenu));
-
+    main_menu->AddItem(MenuItemData::Submenu("Bookmarks", build_bookmarks_menu_items()));
     main_menu->AddItem(MenuItemData::ActionWithShortcut("History", "Ctrl+H", [self] { if (auto s = self.lock()) s->open_internal_page("about:history"); }));
     main_menu->AddItem(MenuItemData::ActionWithShortcut("Downloads", "Ctrl+J", [self] { if (auto s = self.lock()) s->open_internal_page("about:downloads"); }));
     main_menu->AddItem(MenuItemData::Separator());
+    main_menu->AddItem(MenuItemData::Submenu("View", build_view_menu_items()));
+    main_menu->AddItem(MenuItemData::Submenu("Inspect", build_inspect_menu_items()));
 
-    // View submenu: tab switching + zoom controls + a zoom-percentage list.
+    main_menu->AddItem(MenuItemData::Separator());
+    main_menu->AddItem(MenuItemData::Action("Settings", [self] { if (auto s = self.lock()) s->open_internal_page("about:settings"); }));
+
+    int w = 0, h = 0;
+    window->GetWindowSize(w, h);
+    UltraCanvas::PopupElementSettings settings;
+    settings.closeByEscapeKey = true;
+    settings.closeByClickOutside = true;
+    // Drop the menu just under the right end of the toolbar, where the ☰ button sits.
+    main_menu->OpenMenu(UltraCanvas::Point2Di(w - 180, TOOLBAR_HEIGHT), *window, settings);
+}
+
+std::vector<UltraCanvas::MenuItemData> BrowserWindowState::build_bookmarks_menu_items()
+{
+    using UltraCanvas::MenuItemData;
+    auto self = weak_from_this();
+    std::vector<MenuItemData> items;
+    items.push_back(MenuItemData::Action("Manage Bookmarks", [self] { if (auto s = self.lock()) s->open_internal_page("about:bookmarks"); }));
+    items.push_back(MenuItemData::Separator());
+    items.push_back(MenuItemData::ActionWithShortcut("Add Bookmark", "Ctrl+D", [self] { if (auto s = self.lock()) if (auto* c = s->active_controller()) c->toggle_bookmark(); }));
+    items.push_back(MenuItemData::ActionWithShortcut("Bookmark All Tabs...", "Ctrl+Shift+D", [self] { if (auto s = self.lock()) s->bookmark_all_tabs(); }));
+    items.push_back(MenuItemData::Checkbox("Show Bookmarks Bar", bookmarks_bar_visible(), [](bool checked) { set_bookmarks_bar_visible(checked); }));
+    items.push_back(MenuItemData::Separator());
+    for (auto& item : build_bookmark_menu_items(get_bookmarks()))
+        items.push_back(item);
+    return items;
+}
+
+std::vector<UltraCanvas::MenuItemData> BrowserWindowState::build_view_menu_items()
+{
+    using UltraCanvas::MenuItemData;
+    auto self = weak_from_this();
     double zoom = 1.0;
     if (auto* c = active_controller())
         zoom = c->current_zoom();
@@ -687,26 +980,93 @@ void BrowserWindowState::show_main_menu()
         double factor = step.factor;
         zoom_steps.push_back(MenuItemData::Action(label, [self, factor] { if (auto s = self.lock()) if (auto* c = s->active_controller()) c->set_zoom(factor); }));
     }
-    std::vector<MenuItemData> view_submenu;
-    view_submenu.push_back(MenuItemData::ActionWithShortcut("Switch to Previous Tab", "Ctrl+PgUp", [self] { if (auto s = self.lock()) s->switch_to_adjacent_tab(-1); }));
-    view_submenu.push_back(MenuItemData::ActionWithShortcut("Switch to Next Tab", "Ctrl+PgDown", [self] { if (auto s = self.lock()) s->switch_to_adjacent_tab(1); }));
-    view_submenu.push_back(MenuItemData::Separator());
-    view_submenu.push_back(MenuItemData::ActionWithShortcut("Zoom In", "Ctrl++", [self] { if (auto s = self.lock()) if (auto* c = s->active_controller()) c->zoom_in(); }));
-    view_submenu.push_back(MenuItemData::ActionWithShortcut("Zoom Out", "Ctrl+-", [self] { if (auto s = self.lock()) if (auto* c = s->active_controller()) c->zoom_out(); }));
-    view_submenu.push_back(MenuItemData::ActionWithShortcut("Zoom 100%", "Ctrl+0", [self] { if (auto s = self.lock()) if (auto* c = s->active_controller()) c->reset_zoom(); }));
-    view_submenu.push_back(MenuItemData::Submenu("Zoom", zoom_steps));
-    main_menu->AddItem(MenuItemData::Submenu("View", view_submenu));
+    std::vector<MenuItemData> items;
+    items.push_back(MenuItemData::ActionWithShortcut("Switch to Previous Tab", "Ctrl+PgUp", [self] { if (auto s = self.lock()) s->switch_to_adjacent_tab(-1); }));
+    items.push_back(MenuItemData::ActionWithShortcut("Switch to Next Tab", "Ctrl+PgDown", [self] { if (auto s = self.lock()) s->switch_to_adjacent_tab(1); }));
+    items.push_back(MenuItemData::Separator());
+    items.push_back(MenuItemData::ActionWithShortcut("Zoom In", "Ctrl++", [self] { if (auto s = self.lock()) if (auto* c = s->active_controller()) c->zoom_in(); }));
+    items.push_back(MenuItemData::ActionWithShortcut("Zoom Out", "Ctrl+-", [self] { if (auto s = self.lock()) if (auto* c = s->active_controller()) c->zoom_out(); }));
+    items.push_back(MenuItemData::ActionWithShortcut("Zoom 100%", "Ctrl+0", [self] { if (auto s = self.lock()) if (auto* c = s->active_controller()) c->reset_zoom(); }));
+    items.push_back(MenuItemData::Submenu("Zoom", zoom_steps));
+    return items;
+}
 
-    main_menu->AddItem(MenuItemData::Separator());
-    main_menu->AddItem(MenuItemData::Action("Settings", [self] { if (auto s = self.lock()) s->open_internal_page("about:settings"); }));
+std::vector<UltraCanvas::MenuItemData> BrowserWindowState::build_inspect_menu_items()
+{
+    using UltraCanvas::MenuItemData;
+    auto self = weak_from_this();
+    std::vector<MenuItemData> items;
+    items.push_back(MenuItemData::Action("View Source", [] { view_source_active_tab(); }));
+    items.push_back(MenuItemData::Action("Task Manager", [] { open_task_manager(); }));
+    items.push_back(MenuItemData::Separator());
+    items.push_back(MenuItemData::Action(devtools_enabled ? "Disable DevTools" : "Enable DevTools", [self] {
+        auto error = toggle_devtools();
+        if (!error.empty())
+            if (auto s = self.lock())
+                show_alert_dialog("Unable to toggle DevTools: " + error, [] { });
+    }));
+    return items;
+}
 
-    int w = 0, h = 0;
-    window->GetWindowSize(w, h);
-    UltraCanvas::PopupElementSettings settings;
-    settings.closeByEscapeKey = true;
-    settings.closeByClickOutside = true;
-    // Drop the menu just under the right end of the toolbar, where the ☰ button sits.
-    main_menu->OpenMenu(UltraCanvas::Point2Di(w - 180, TOOLBAR_HEIGHT), *window, settings);
+void BrowserWindowState::build_menu_bar()
+{
+    using UltraCanvas::MenuItemData;
+    if (!menu_bar)
+        return;
+    auto self = weak_from_this();
+    menu_bar->Clear();
+
+    // File
+    std::vector<MenuItemData> file_items;
+    file_items.push_back(MenuItemData::ActionWithShortcut("New Tab", "Ctrl+T", [self] {
+        if (auto s = self.lock()) {
+            s->add_tab(create_web_content_view(s->is_private), true);
+            if (auto* c = s->active_controller())
+                c->load("about:blank"sv);
+        }
+    }));
+    file_items.push_back(MenuItemData::ActionWithShortcut("New Window", "Ctrl+N", [] { open_url_in_new_browser_window("about:blank"sv, false); }));
+    file_items.push_back(MenuItemData::ActionWithShortcut("New Private Window", "Ctrl+Shift+N", [] { open_url_in_new_browser_window("about:blank"sv, true); }));
+    file_items.push_back(MenuItemData::ActionWithShortcut("Open File...", "Ctrl+O", [self] { if (auto s = self.lock()) s->open_file(); }));
+    file_items.push_back(MenuItemData::Separator());
+    file_items.push_back(MenuItemData::ActionWithShortcut("Close Tab", "Ctrl+W", [self] { if (auto s = self.lock()) s->close_active_tab(); }));
+    menu_bar->AddItem(MenuItemData::Submenu("File", file_items));
+
+    // View / Bookmarks / History / Inspect / Settings — provider-backed so they reflect current
+    // state (zoom checkmarks, bookmark list, DevTools enabled) each time they're opened.
+    menu_bar->AddItem(MenuItemData::Submenu("View", [self]() -> std::vector<MenuItemData> {
+        if (auto s = self.lock()) return s->build_view_menu_items();
+        return {};
+    }));
+    menu_bar->AddItem(MenuItemData::Submenu("Bookmarks", [self]() -> std::vector<MenuItemData> {
+        if (auto s = self.lock()) return s->build_bookmarks_menu_items();
+        return {};
+    }));
+    std::vector<MenuItemData> history_items;
+    history_items.push_back(MenuItemData::ActionWithShortcut("Show All History", "Ctrl+H", [self] { if (auto s = self.lock()) s->open_internal_page("about:history"); }));
+    menu_bar->AddItem(MenuItemData::Submenu("History", history_items));
+    menu_bar->AddItem(MenuItemData::Submenu("Inspect", [self]() -> std::vector<MenuItemData> {
+        if (auto s = self.lock()) return s->build_inspect_menu_items();
+        return {};
+    }));
+    std::vector<MenuItemData> tools_items;
+    tools_items.push_back(MenuItemData::ActionWithShortcut("Downloads", "Ctrl+J", [self] { if (auto s = self.lock()) s->open_internal_page("about:downloads"); }));
+    tools_items.push_back(MenuItemData::Action("Settings", [self] { if (auto s = self.lock()) s->open_internal_page("about:settings"); }));
+    menu_bar->AddItem(MenuItemData::Submenu("Tools", tools_items));
+}
+
+void BrowserWindowState::apply_devtools_banner(int port)
+{
+    if (!devtools_banner)
+        return;
+    if (devtools_enabled) {
+        if (devtools_label)
+            devtools_label->SetText("DevTools is enabled on port " + std::to_string(port));
+        devtools_banner->SetVisible(true);
+    } else {
+        devtools_banner->SetVisible(false);
+    }
+    relayout();
 }
 
 std::vector<UltraCanvas::MenuItemData> BrowserWindowState::build_bookmark_menu_items(std::vector<BookmarkNode> const& nodes)
@@ -886,6 +1246,22 @@ void open_browser_window(WebViewHandle const& first_view, StringView initial_url
     config.width = 1024;
     config.height = 768;
 
+    // Restore the previous window geometry (size/position/maximized), if any.
+    bool start_maximized = false;
+    if (auto saved = load_window_geometry(); saved.has_value()) {
+        state->window_geometry = *saved;
+        config.width = saved->width;
+        config.height = saved->height;
+        if (saved->x >= 0 && saved->y >= 0) {
+            config.x = saved->x;
+            config.y = saved->y;
+        }
+        start_maximized = saved->maximized;
+    } else {
+        state->window_geometry.width = config.width;
+        state->window_geometry.height = config.height;
+    }
+
     auto window = UltraCanvas::CreateWindow(config);
     if (!window)
         return;
@@ -978,9 +1354,16 @@ void open_browser_window(WebViewHandle const& first_view, StringView initial_url
         };
     }
 
+    // Wake-lock indicator (right of the address bar): a lock glyph shown while the active tab holds
+    // a screen wake lock. Hidden by default.
+    auto wake_lock_indicator = toolbar->AddLabel("wake-lock", "\xF0\x9F\x94\x92"); // 🔒
+    state->wake_lock_indicator = wake_lock_indicator;
+    if (wake_lock_indicator)
+        wake_lock_indicator->SetVisible(false);
+
     // Downloads button (right of the address bar): opens about:downloads, shows a live count while
     // downloads are active. Hidden when there are none.
-    auto downloads_button = toolbar->AddButton("downloads", "", "", [self] { if (auto s = self.lock()) s->open_internal_page("about:downloads"); });
+    auto downloads_button = toolbar->AddButton("downloads", "", "", [self] { if (auto s = self.lock()) s->show_downloads_popover(); });
     state->downloads_button = downloads_button;
 
     // "Private" badge (right of the address bar), only in private-browsing windows.
@@ -998,7 +1381,9 @@ void open_browser_window(WebViewHandle const& first_view, StringView initial_url
     tab_container->SetCloseMode(UltraCanvas::TabCloseMode::Closable);
     state->tab_container = tab_container;
 
-    tab_container->onTabChange = [self](int, int) { if (auto s = self.lock()) s->on_active_changed(); };
+    tab_container->onTabChange = [self](int, int) { if (auto s = self.lock()) { s->show_tab_preview(-1); s->on_active_changed(); } };
+    // Hovering a tab shows a thumbnail preview under it; leaving the tab strip (index -1) hides it.
+    tab_container->onTabHover = [self](int index) { if (auto s = self.lock()) s->show_tab_preview(index); };
     // Right-click a tab: show the tab context menu (reload / duplicate / move / close variants).
     tab_container->onTabContextMenu = [self](int index, int window_x, int window_y) {
         if (auto s = self.lock())
@@ -1100,25 +1485,72 @@ void open_browser_window(WebViewHandle const& first_view, StringView initial_url
     bookmarks_bar->SetOrientation(UltraCanvas::ToolbarOrientation::Horizontal);
     state->bookmarks_bar = bookmarks_bar;
 
+    // ===== Traditional top menu bar (File / View / Bookmarks / History / Inspect / Tools). Sits
+    // above everything else. Populated by build_menu_bar() with provider-backed submenus.
+    auto menu_bar = UltraCanvas::CreateMenuBar("menu-bar");
+    state->menu_bar = menu_bar;
+    state->build_menu_bar();
+
+    // ===== DevTools banner (top strip). Hidden until the DevTools server is enabled; shows the
+    // port plus "Open Client" / "Disable" buttons, mirroring UI/Qt/DevToolsBanner.
+    auto devtools_banner = std::make_shared<UltraCanvas::UltraCanvasToolbar>("devtools-banner", static_cast<float>(config.width), static_cast<float>(DEVTOOLS_BANNER_HEIGHT));
+    devtools_banner->SetOrientation(UltraCanvas::ToolbarOrientation::Horizontal);
+    state->devtools_banner = devtools_banner;
+    state->devtools_label = devtools_banner->AddLabel("devtools-label", "");
+    devtools_banner->AddButton("devtools-open-client", "Open Client", "", [] {
+        auto error = launch_devtools_client();
+        if (!error.empty())
+            show_alert_dialog("Unable to launch the DevTools client: " + error, [] { });
+    });
+    devtools_banner->AddButton("devtools-disable", "Disable", "", [] { (void)toggle_devtools(); });
+    devtools_banner->SetVisible(false);
+
     // The container re-sorts children by z-index in Arrange() (UltraCanvasContainer::
     // SortChildrenByZOrder), and the vertical layout follows that order. With all z at 0
-    // the sort is ambiguous, so set explicit z-indices to fix the stacking: main toolbar on
-    // top, then the bookmarks bar, then the find bar, then the tab container fills the rest.
+    // the sort is ambiguous, so set explicit z-indices to fix the stacking: menu bar at the very
+    // top, then the DevTools banner, main toolbar, bookmarks bar, find bar, then the tab container.
+    menu_bar->SetZIndex(-2);
+    devtools_banner->SetZIndex(-1);
     toolbar->SetZIndex(0);
     bookmarks_bar->SetZIndex(1);
     find_bar->SetZIndex(2);
     tab_container->SetZIndex(3);
+    window->AddChild(menu_bar);
+    window->AddChild(devtools_banner);
     window->AddChild(toolbar);
     window->AddChild(bookmarks_bar);
     window->AddChild(find_bar);
     window->AddChild(tab_container);
 
-    window->onWindowResize = [self](int, int) { if (auto s = self.lock()) s->relayout(); };
+    // Tab hover preview overlay: created with a non-zero origin so it is an absolute-positioned
+    // (out-of-flow) floating child, on top of everything. Hidden until a tab is hovered.
+    auto tab_preview = UltraCanvas::CreateImageElement("tab-preview", 1, 1, static_cast<float>(TAB_PREVIEW_WIDTH + TAB_PREVIEW_BORDER_WIDTH), static_cast<float>(TAB_PREVIEW_HEIGHT + TAB_PREVIEW_BORDER_WIDTH));
+    state->tab_preview = tab_preview;
+    if (tab_preview) {
+        tab_preview->SetZIndex(1000);
+        tab_preview->SetVisible(false);
+        // 2px border to make the preview stand out from the page behind it. Pick a color that
+        // contrasts with the chrome background: dark on a light theme, light on a dark theme.
+        auto bg = window->GetBackgroundColor();
+        bool dark_theme = (0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b) < 128.0;
+        auto border_color = dark_theme ? UltraCanvas::Color(200, 200, 200, 255) : UltraCanvas::Color(60, 60, 60, 255);
+        tab_preview->SetBorders(TAB_PREVIEW_BORDER_WIDTH, border_color);
+        tab_preview->SetBackgroundColor(dark_theme ? UltraCanvas::Color(60, 60, 60, 255) : UltraCanvas::Color(200, 200, 200, 255));
+        window->AddChild(tab_preview);
+    }
+
+    window->onWindowResize = [self](int, int) { if (auto s = self.lock()) { s->relayout(); s->capture_window_geometry(); } };
+    window->onWindowMove = [self](int, int) { if (auto s = self.lock()) s->capture_window_geometry(); };
+    window->onWindowMaximize = [self] { if (auto s = self.lock()) { s->capture_window_geometry(); save_window_geometry(s->window_geometry); } };
+    window->onWindowRestore = [self] { if (auto s = self.lock()) { s->capture_window_geometry(); save_window_geometry(s->window_geometry); } };
     window->onWindowFocus = [self] { s_active_window = self; };
     window->onWindowClosed = [self] {
         auto s = self.lock();
         if (!s)
             return;
+        // Persist the final geometry before the window (and its live size) go away.
+        s->capture_window_geometry();
+        save_window_geometry(s->window_geometry);
         std::erase_if(s_windows, [&](auto const& e) { return e.get() == s.get(); });
     };
 
@@ -1270,6 +1702,13 @@ void open_browser_window(WebViewHandle const& first_view, StringView initial_url
             for (auto& w : s_windows)
                 w->update_downloads_button();
         });
+        // Show/hide every window's DevTools banner as the server is enabled/disabled.
+        set_on_devtools_state_changed([](bool enabled, int port) {
+            for (auto& w : s_windows) {
+                w->devtools_enabled = enabled;
+                w->apply_devtools_banner(port);
+            }
+        });
     }
 
     // First tab uses the view created by the caller.
@@ -1279,6 +1718,8 @@ void open_browser_window(WebViewHandle const& first_view, StringView initial_url
     state->relayout();
 
     window->Show();
+    if (start_maximized)
+        window->Maximize();
     s_windows.push_back(state);
     // A newly-opened window is the one the user is looking at (onWindowFocus may not have
     // fired yet), so make it the target for subsequent open-in-new-tab requests.

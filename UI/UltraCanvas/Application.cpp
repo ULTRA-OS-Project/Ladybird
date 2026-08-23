@@ -20,6 +20,7 @@
 
 #include <UI/UltraCanvas/Application.h>
 #include <UI/UltraCanvas/BrowserWindow.h>
+#include <UI/UltraCanvas/DevTools.h>
 #include <UI/UltraCanvas/EventLoopImplementationUltraCanvas.h>
 #include <UI/UltraCanvas/UltraCanvasPlatform.h>
 
@@ -213,6 +214,18 @@ void Application::open_url_in_new_window(URL::URL const& url, WebView::IsPrivate
 {
     auto serialized = url.serialize();
     open_url_in_new_browser_window(serialized.bytes_as_string_view(), is_private == WebView::IsPrivate::Yes);
+}
+
+void Application::on_devtools_enabled() const
+{
+    WebView::Application::on_devtools_enabled();
+    notify_devtools_state_changed(true, WebView::Application::browser_options().devtools_port.value_or(0));
+}
+
+void Application::on_devtools_disabled() const
+{
+    WebView::Application::on_devtools_disabled();
+    notify_devtools_state_changed(false, 0);
 }
 
 Optional<WebView::ViewImplementation&> Application::open_blank_new_tab(Web::HTML::ActivateTab activate_tab) const
