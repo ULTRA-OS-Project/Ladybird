@@ -14,10 +14,19 @@
 
 #include <UI/UltraCanvas/EventLoopImplementationUltraCanvas.h>
 
-#include <fcntl.h>
+#include <AK/Platform.h>
 #include <pthread.h>
 #include <signal.h>
-#include <unistd.h>
+#ifndef AK_OS_WINDOWS
+#    include <fcntl.h>
+#    include <unistd.h>
+#endif
+#ifdef AK_OS_WINDOWS
+#    include <atomic>
+#    include <memory>
+#    include <mutex>
+#    include <thread>
+#endif
 
 // UltraCanvas headers last (they include X11).
 #include <UltraCanvasApplication.h>
@@ -31,8 +40,6 @@ namespace Ladybird {
 // UltraCanvas fd-watch instead of a QSocketNotifier.
 namespace {
 
-int s_signal_pipe[2] = { -1, -1 };
-
 struct SignalRegistration {
     int signal_number { 0 };
     int id { 0 };
@@ -41,15 +48,6 @@ struct SignalRegistration {
 
 HashMap<int, Vector<SignalRegistration>> s_signal_handlers;
 int s_next_signal_id = 1;
-
-void os_signal_handler(int signal_number)
-{
-    // Runs in signal context: only async-signal-safe work (a single write()).
-    if (s_signal_pipe[1] >= 0) {
-        auto byte = static_cast<unsigned char>(signal_number);
-        [[maybe_unused]] auto written = ::write(s_signal_pipe[1], &byte, 1);
-    }
-}
 
 void dispatch_signal(int signal_number)
 {
@@ -61,6 +59,30 @@ void dispatch_signal(int signal_number)
     for (auto& registration : it->value)
         registration.handler(signal_number);
 }
+
+#ifdef AK_OS_WINDOWS
+// Windows (MSVC/clang-cl) has no sigaction/self-pipe. Use the C signal() handler, which Windows
+// delivers on a dedicated thread, and marshal the dispatch onto the UI thread via UltraCanvas.
+EventLoopManagerUltraCanvas* s_signal_manager = nullptr;
+
+void os_signal_handler(int signal_number)
+{
+    ::signal(signal_number, os_signal_handler); // Windows resets to SIG_DFL after each delivery.
+    if (s_signal_manager)
+        s_signal_manager->app().PostToUIThread([signal_number] { dispatch_signal(signal_number); });
+}
+#else
+int s_signal_pipe[2] = { -1, -1 };
+
+void os_signal_handler(int signal_number)
+{
+    // Runs in signal context: only async-signal-safe work (a single write()).
+    if (s_signal_pipe[1] >= 0) {
+        auto byte = static_cast<unsigned char>(signal_number);
+        [[maybe_unused]] auto written = ::write(s_signal_pipe[1], &byte, 1);
+    }
+}
+#endif
 
 }
 
@@ -127,6 +149,34 @@ void EventLoopManagerUltraCanvas::did_post_event()
     });
 }
 
+#ifdef AK_OS_WINDOWS
+int EventLoopManagerUltraCanvas::register_signal(int signal_number, Function<void(int)> handler)
+{
+    VERIFY(signal_number != 0);
+    s_signal_manager = this;
+
+    int id = s_next_signal_id++;
+    auto& handlers = s_signal_handlers.ensure(signal_number);
+    bool is_first_for_signal = handlers.is_empty();
+    handlers.append(SignalRegistration { signal_number, id, move(handler) });
+
+    if (is_first_for_signal)
+        ::signal(signal_number, os_signal_handler);
+    return id;
+}
+
+void EventLoopManagerUltraCanvas::unregister_signal(int handler_id)
+{
+    VERIFY(handler_id != 0);
+    for (auto& entry : s_signal_handlers) {
+        auto& handlers = entry.value;
+        auto size_before = handlers.size();
+        handlers.remove_all_matching([&](auto& registration) { return registration.id == handler_id; });
+        if (handlers.size() != size_before && handlers.is_empty())
+            ::signal(entry.key, SIG_DFL);
+    }
+}
+#else
 int EventLoopManagerUltraCanvas::register_signal(int signal_number, Function<void(int)> handler)
 {
     VERIFY(signal_number != 0);
@@ -179,6 +229,82 @@ void EventLoopManagerUltraCanvas::unregister_signal(int handler_id)
         }
     }
 }
+#endif
+
+#ifdef AK_OS_WINDOWS
+// Ladybird monitors each spawned child (WebContent, RequestServer, ...) for exit via
+// register_process. UltraCanvas has no HANDLE notifier, so we wait on the process HANDLE on a
+// background thread and marshal the exit handler onto the UI thread (mirrors the Qt backend's
+// QWinEventNotifier-based implementation). A shared control block owns the cancel event so
+// unregister_process can wake the waiter without racing the thread that owns the HANDLE.
+namespace {
+
+struct WinProcessMonitor {
+    HANDLE cancel_event { nullptr };
+    std::atomic<bool> cancelled { false };
+    ~WinProcessMonitor()
+    {
+        if (cancel_event)
+            CloseHandle(cancel_event);
+    }
+};
+
+std::mutex s_process_mutex;
+HashMap<pid_t, std::shared_ptr<WinProcessMonitor>> s_process_monitors;
+
+}
+
+void EventLoopManagerUltraCanvas::register_process(pid_t pid, ESCAPING Function<void(pid_t)> exit_handler)
+{
+    HANDLE process_handle = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(pid));
+    if (!process_handle)
+        return; // Can't monitor this pid; exit detection simply won't fire for it.
+
+    auto monitor = std::make_shared<WinProcessMonitor>();
+    monitor->cancel_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+
+    {
+        std::lock_guard<std::mutex> lock(s_process_mutex);
+        if (s_process_monitors.contains(pid)) {
+            CloseHandle(process_handle);
+            return;
+        }
+        s_process_monitors.set(pid, monitor);
+    }
+
+    // Function<> is move-only; wrap it so the (copyable) PostToUIThread task can carry it.
+    auto handler = std::make_shared<Function<void(pid_t)>>(move(exit_handler));
+    std::thread([this, pid, process_handle, monitor, handler]() {
+        HANDLE waits[2] = { process_handle, monitor->cancel_event };
+        DWORD result = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+        CloseHandle(process_handle);
+
+        {
+            std::lock_guard<std::mutex> lock(s_process_mutex);
+            s_process_monitors.remove(pid);
+        }
+
+        // WAIT_OBJECT_0 = the child exited; WAIT_OBJECT_0 + 1 = unregister_process cancelled us.
+        if (result == WAIT_OBJECT_0 && !monitor->cancelled.load())
+            m_app.PostToUIThread([pid, handler]() { (*handler)(pid); });
+    }).detach();
+}
+
+void EventLoopManagerUltraCanvas::unregister_process(pid_t pid)
+{
+    std::shared_ptr<WinProcessMonitor> monitor;
+    {
+        std::lock_guard<std::mutex> lock(s_process_mutex);
+        if (auto existing = s_process_monitors.get(pid); existing.has_value())
+            monitor = existing.value();
+    }
+    if (monitor) {
+        // We hold a ref, so cancel_event stays valid for this call even if the waiter races us.
+        monitor->cancelled.store(true);
+        SetEvent(monitor->cancel_event);
+    }
+}
+#endif
 
 EventLoopImplementationUltraCanvas::EventLoopImplementationUltraCanvas(EventLoopManagerUltraCanvas& manager)
     : m_manager(manager)

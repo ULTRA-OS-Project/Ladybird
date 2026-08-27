@@ -63,12 +63,12 @@ ErrorOr<Process> Process::spawn(ProcessSpawnOptions const& options)
     BOOL result = CreateProcess(
         NULL,
         (char*)command_line.data(),
-        NULL, // process security attributes
-        NULL, // primary thread security attributes
-        TRUE, // handles are inherited
-        0,    // creation flags
-        NULL, // use parent's environment
-        NULL, // working directory
+        NULL,             // process security attributes
+        NULL,             // primary thread security attributes
+        TRUE,             // handles are inherited (so children share our redirected stdout/stderr)
+        CREATE_NO_WINDOW, // don't pop a console window for each console-subsystem helper process
+        NULL,             // use parent's environment
+        NULL,             // working directory
         &startup_info,
         &process_info);
 

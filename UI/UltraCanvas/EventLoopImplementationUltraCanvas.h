@@ -44,6 +44,13 @@ public:
     virtual int register_signal(int signal_number, Function<void(int)> handler) override;
     virtual void unregister_signal(int handler_id) override;
 
+#if defined(AK_OS_WINDOWS)
+    // Monitors a spawned child process (WebContent, etc.) for exit. Only used on Windows, exactly
+    // like EventLoopManagerQt (on Unix the base class default is never reached for this backend).
+    virtual void register_process(pid_t, ESCAPING Function<void(pid_t)>) override;
+    virtual void unregister_process(pid_t) override;
+#endif
+
     UltraCanvas::UltraCanvasApplicationBase& app() { return m_app; }
 
 private:

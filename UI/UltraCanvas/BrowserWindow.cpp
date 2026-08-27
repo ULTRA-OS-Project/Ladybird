@@ -267,6 +267,9 @@ public:
     // Update the DevTools banner label/visibility from devtools_enabled + port, then relayout.
     void apply_devtools_banner(int port);
 
+    // Menu bar.
+    void apply_menu_bar_visibility();
+
     // Bookmarks.
     void rebuild_bookmarks_bar();
     void apply_bookmarks_bar_visibility();
@@ -988,6 +991,8 @@ std::vector<UltraCanvas::MenuItemData> BrowserWindowState::build_view_menu_items
     items.push_back(MenuItemData::ActionWithShortcut("Zoom Out", "Ctrl+-", [self] { if (auto s = self.lock()) if (auto* c = s->active_controller()) c->zoom_out(); }));
     items.push_back(MenuItemData::ActionWithShortcut("Zoom 100%", "Ctrl+0", [self] { if (auto s = self.lock()) if (auto* c = s->active_controller()) c->reset_zoom(); }));
     items.push_back(MenuItemData::Submenu("Zoom", zoom_steps));
+    items.push_back(MenuItemData::Separator());
+    items.push_back(MenuItemData::Checkbox("Show Menu Bar", menu_bar_visible(), [](bool checked) { set_menu_bar_visible(checked); }));
     return items;
 }
 
@@ -1132,6 +1137,14 @@ void BrowserWindowState::rebuild_bookmarks_bar()
             }
         }
     }
+    relayout();
+}
+
+void BrowserWindowState::apply_menu_bar_visibility()
+{
+    if (!menu_bar)
+        return;
+    menu_bar->SetVisible(menu_bar_visible());
     relayout();
 }
 
@@ -1608,6 +1621,9 @@ void open_browser_window(WebViewHandle const& first_view, StringView initial_url
                 case UltraCanvas::UCKeys::B: // toggle the bookmarks bar
                     set_bookmarks_bar_visible(!bookmarks_bar_visible());
                     return true;
+                case UltraCanvas::UCKeys::M: // toggle the menu bar
+                    set_menu_bar_visible(!menu_bar_visible());
+                    return true;
                 case UltraCanvas::UCKeys::D: // bookmark all tabs
                     s->bookmark_all_tabs();
                     return true;
@@ -1697,6 +1713,10 @@ void open_browser_window(WebViewHandle const& first_view, StringView initial_url
             for (auto& w : s_windows)
                 w->apply_bookmarks_bar_visibility();
         });
+        set_on_menu_bar_visibility_changed([] {
+            for (auto& w : s_windows)
+                w->apply_menu_bar_visibility();
+        });
         // Refresh every window's downloads button as downloads start/progress/finish.
         set_on_downloads_changed([] {
             for (auto& w : s_windows)
@@ -1713,6 +1733,7 @@ void open_browser_window(WebViewHandle const& first_view, StringView initial_url
 
     // First tab uses the view created by the caller.
     state->add_tab(first_view, true);
+    state->apply_menu_bar_visibility();      // show/hide the menu bar per setting (also relayouts)
     state->apply_bookmarks_bar_visibility(); // populate + show/hide per setting (also relayouts)
     state->update_downloads_button();        // hidden until a download is active
     state->relayout();

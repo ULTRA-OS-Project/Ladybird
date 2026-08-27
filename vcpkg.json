@@ -59,7 +59,41 @@
     "fmt",
     {
       "name": "fontconfig",
-      "platform": "linux | bsd | osx"
+      "platform": "linux | bsd | osx | windows"
+    },
+    {
+      "name": "cairo",
+      "platform": "windows"
+    },
+    {
+      "name": "pango",
+      "platform": "windows"
+    },
+    {
+      "name": "glib",
+      "platform": "windows"
+    },
+    {
+      "name": "tinyxml2",
+      "platform": "windows"
+    },
+    {
+      "name": "freetype",
+      "platform": "windows"
+    },
+    {
+      "name": "libvips",
+      "platform": "windows",
+      "default-features": false,
+      "features": [
+        "cplusplus",
+        "png",
+        "jpeg",
+        "webp",
+        "tiff",
+        "zlib",
+        "rsvg"
+      ]
     },
     {
       "name": "harfbuzz",

@@ -21,8 +21,22 @@
 #include <UI/UltraCanvas/GeolocationProvider.h>
 #include <UI/UltraCanvas/WebViewController.h>
 
+#if defined(AK_OS_WINDOWS)
+namespace Ladybird {
+// Redirects stdout/stderr (dbgln/warnln + crash traces) to a log file so the windowed (no-console)
+// build still records diagnostics. Defined in WindowsDebugLog.cpp. Consumes a --debug-log <path>
+// argument if present; otherwise logs to <exe_dir>\debug.log.
+void setup_windows_debug_log(Main::Arguments&);
+}
+#endif
+
 ErrorOr<int> ladybird_main(Main::Arguments arguments)
 {
+#if defined(AK_OS_WINDOWS)
+    // Do this first, before any logging or child-process launches, so everything is captured.
+    Ladybird::setup_windows_debug_log(arguments);
+#endif
+
     auto app = TRY(Ladybird::Application::create(arguments));
 
     // Register a geolocation provider so navigator.geolocation requests get a deliberate

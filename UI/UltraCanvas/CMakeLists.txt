@@ -16,11 +16,24 @@
 # -fexceptions overrides -fno-exceptions and -Wno-error/-w defuse -Werror. They
 # apply both to the nested UltraCanvas library and to our glue sources below,
 # which include UltraCanvas headers that use exceptions and RTTI.
-add_compile_options(
-    $<$<COMPILE_LANGUAGE:C,CXX>:-fexceptions>
-    $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-error>
-    $<$<COMPILE_LANGUAGE:C,CXX>:-w>
-)
+if (MSVC)
+    # clang-cl: the global build disables exceptions with /EHs- (Meta/CMake/compile_options.cmake).
+    # Re-enable exceptions (/EHsc) and RTTI (/GR) the MSVC way; -fexceptions is not a clang-cl flag.
+    # Appended after the inherited flags, so last-one-wins re-enables exceptions. /w /WX- silence
+    # UltraCanvas's non-clean warnings without failing the build.
+    add_compile_options(
+        $<$<COMPILE_LANGUAGE:C,CXX>:/EHsc>
+        $<$<COMPILE_LANGUAGE:CXX>:/GR>
+        $<$<COMPILE_LANGUAGE:C,CXX>:/w>
+        $<$<COMPILE_LANGUAGE:C,CXX>:/WX->
+    )
+else()
+    add_compile_options(
+        $<$<COMPILE_LANGUAGE:C,CXX>:-fexceptions>
+        $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-error>
+        $<$<COMPILE_LANGUAGE:C,CXX>:-w>
+    )
+endif()
 
 # --- Trim the UltraCanvas build to what the browser chrome needs ---
 # Disable every optional plugin plus networking, audio, video, GL surfaces and the
@@ -38,6 +51,9 @@ set(ULTRACANVAS_ENABLE_AUDIO   OFF CACHE BOOL "" FORCE)
 set(ULTRACANVAS_ENABLE_VIDEO   OFF CACHE BOOL "" FORCE)
 set(ULTRACANVAS_ENABLE_NET     OFF CACHE BOOL "" FORCE)
 set(ULTRACANVAS_ENABLE_DATABASE OFF CACHE BOOL "" FORCE)
+# libvips is kept enabled on every platform: it is UltraCanvas's raster image loader (PNG/JPEG/WebP/
+# ...), so without it the browser chrome can't load images. On Windows it is supplied MSVC-ABI by
+# vcpkg via libvips[cplusplus] (see vcpkg.json), which emits the vips + vips-cpp .pc files UC needs.
 foreach(_uc_plugin
         CDR VECTOR XAR SVG PDF OCR VECTORIZER LATEX
         SMTP IMAP POP3 JMAP WEBDAV LDAP TELNET RTSP MQTT AMQP COAP
@@ -65,3 +81,24 @@ target_sources(ladybird PRIVATE
 target_link_libraries(ladybird PRIVATE UltraCanvas)
 
 create_ladybird_bundle(ladybird)
+
+if (WIN32)
+    # Redirects stdout/stderr (debug + crash logs) to a file since the windowed build has no console.
+    target_sources(ladybird PRIVATE WindowsDebugLog.cpp)
+
+    # Build as a windowed (GUI-subsystem) app so no console window appears. ladybird_windows_bin
+    # (without CONSOLE) applies /ENTRY:mainCRTStartup, so the CRT still uses LibMain's main() rather
+    # than requiring WinMain, and copies the vcpkg runtime DLLs next to the executable.
+    ladybird_windows_bin(ladybird)
+
+    # UltraCanvas registers its default UI fonts (Ubuntu) from <exe_dir>/Resources/media/fonts/ on
+    # startup (GetResourcesDir() + GetBundledFontsDir() -> LoadBundledFontsNative). Stage them there
+    # so the chrome renders with Ubuntu instead of falling back to a monospace default. These fonts
+    # are what the other UltraCanvas apps ship, from the toolkit's media/fonts/.
+    add_custom_command(TARGET ladybird POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/UltraCanvasSources/media/fonts"
+            "$<TARGET_FILE_DIR:ladybird>/Resources/media/fonts"
+        VERBATIM
+    )
+endif()

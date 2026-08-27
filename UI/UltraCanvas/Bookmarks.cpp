@@ -21,6 +21,7 @@ namespace Ladybird {
 
 static std::function<void()> s_on_bookmarks_changed;
 static std::function<void()> s_on_bookmarks_bar_visibility_changed;
+static std::function<void()> s_on_menu_bar_visibility_changed;
 
 static std::string to_std(StringView view)
 {
@@ -129,6 +130,16 @@ void set_bookmarks_bar_visible(bool visible)
     WebView::Application::settings().set_show_bookmarks_bar(visible);
 }
 
+bool menu_bar_visible()
+{
+    return WebView::Application::settings().show_menu_bar();
+}
+
+void set_menu_bar_visible(bool visible)
+{
+    WebView::Application::settings().set_show_menu_bar(visible);
+}
+
 namespace {
 
 // Bridges the LibWebView observers to the X11-side callbacks. Both auto-register in their
@@ -146,6 +157,11 @@ class BridgeSettingsObserver final : public WebView::SettingsObserver {
     {
         if (s_on_bookmarks_bar_visibility_changed)
             s_on_bookmarks_bar_visibility_changed();
+    }
+    virtual void show_menu_bar_changed() override
+    {
+        if (s_on_menu_bar_visibility_changed)
+            s_on_menu_bar_visibility_changed();
     }
 };
 
@@ -170,6 +186,13 @@ void set_on_bookmarks_changed(std::function<void()> callback)
 void set_on_bookmarks_bar_visibility_changed(std::function<void()> callback)
 {
     s_on_bookmarks_bar_visibility_changed = move(callback);
+    if (!s_settings_observer)
+        s_settings_observer = new BridgeSettingsObserver;
+}
+
+void set_on_menu_bar_visibility_changed(std::function<void()> callback)
+{
+    s_on_menu_bar_visibility_changed = move(callback);
     if (!s_settings_observer)
         s_settings_observer = new BridgeSettingsObserver;
 }

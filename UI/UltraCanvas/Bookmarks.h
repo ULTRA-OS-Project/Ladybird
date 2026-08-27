@@ -51,9 +51,14 @@ void open_bookmark_folder_in_new_tabs(std::string const& id);
 bool bookmarks_bar_visible();
 void set_bookmarks_bar_visible(bool);
 
+// "Show menu bar" setting (persisted to the profile config).
+bool menu_bar_visible();
+void set_menu_bar_visible(bool);
+
 // Subscribe to changes; the callback runs on the UI thread. Registering also installs the
 // underlying LibWebView observers on first use.
 void set_on_bookmarks_changed(std::function<void()>);
 void set_on_bookmarks_bar_visibility_changed(std::function<void()>);
+void set_on_menu_bar_visibility_changed(std::function<void()>);
 
 }
