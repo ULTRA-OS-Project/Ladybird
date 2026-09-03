@@ -22,14 +22,17 @@
 #include <UltraCanvasAutoComplete.h>
 #include <UltraCanvasButton.h>
 #include <UltraCanvasClipboard.h>
+#include <UltraCanvasConfig.h>
 #include <UltraCanvasImage.h>
 #include <UltraCanvasImageElement.h>
 #include <UltraCanvasLabel.h>
 #include <UltraCanvasMenu.h>
+#include <UltraCanvasSplashScreen.h>
 #include <UltraCanvasTabbedContainer.h>
 #include <UltraCanvasTextInput.h>
 #include <UltraCanvasToolbar.h>
 #include <UltraCanvasTooltipManager.h>
+#include <UltraCanvasUtils.h>
 #include <UltraCanvasWindow.h>
 
 #include <memory>
@@ -286,6 +289,11 @@ static std::vector<std::shared_ptr<BrowserWindowState>> s_windows;
 // The window most recently focused (or created). "Open in new tab" / View Source add their
 // tab here; updated on window focus so a right-click in one of several windows targets it.
 static std::weak_ptr<BrowserWindowState> s_active_window;
+
+// The startup splash. File-scope so it outlives open_browser_window() (which returns before the
+// event loop runs) — the splash times itself out on that loop. Shown once, for the first window.
+static UltraCanvas::UltraCanvasSplashScreen s_splash;
+static bool s_splash_shown = false;
 
 void BrowserWindowState::add_tab(WebViewHandle handle, bool activate)
 {
@@ -1258,6 +1266,8 @@ void open_browser_window(WebViewHandle const& first_view, StringView initial_url
     config.title = is_private ? "Ladybird (Private)" : "Ladybird";
     config.width = 1024;
     config.height = 768;
+    // The Ladybird mark doubles as the window / taskbar icon (transparent outside the disc).
+    config.iconPath = UltraCanvas::NormalizePath(UltraCanvas::GetResourcesDir() + "media/appicon/Ladybird.png");
 
     // Restore the previous window geometry (size/position/maximized), if any.
     bool start_maximized = false;
@@ -1745,6 +1755,40 @@ void open_browser_window(WebViewHandle const& first_view, StringView initial_url
     // A newly-opened window is the one the user is looking at (onWindowFocus may not have
     // fired yet), so make it the target for subsequent open-in-new-tab requests.
     s_active_window = state;
+
+    // Splash screen: shown once, on the first window, parented to it so it lands on the same
+    // monitor. It times itself out after two seconds (or closes on click) once the event loop
+    // runs. See Docs/Ladybird/SplashScreen.md. If the image can't be loaded Show() no-ops and
+    // the browser starts normally.
+    if (!s_splash_shown) {
+        s_splash_shown = true;
+
+        UltraCanvas::SplashScreenConfig splash_config;
+        splash_config.width       = 440;
+        splash_config.height      = 640;
+        splash_config.showTimeout = 2000; // two seconds, then it closes itself
+
+        splash_config.imagePath     = UltraCanvas::NormalizePath(UltraCanvas::GetResourcesDir() + "media/appicon/Ladybird.png");
+        splash_config.logoSize      = 250;
+        splash_config.title         = "Ladybird";
+        splash_config.titleFontSize = 28;
+        splash_config.version       = LADYBIRD_VERSION;      // rendered as "Version 0.1.0"
+        splash_config.versionDate   = LADYBIRD_VERSION_DATE; // the release date
+
+        splash_config.attributionText      = "GUI by";
+        splash_config.attributionImagePath = UltraCanvas::NormalizePath(UltraCanvas::GetResourcesDir() + "media/images/UltraCanvas-logo.png");
+        splash_config.attributionName      = "Ultra Canvas";
+        splash_config.attributionLogoSize  = 100;
+
+        // Carry the version and credited name as dark as the title rather than the framework's
+        // default mid grey for secondary lines.
+        splash_config.versionFontSize         = 14;
+        splash_config.attributionFontSize     = 14;
+        splash_config.attributionNameFontSize = 12;
+        splash_config.secondaryTextColor      = UltraCanvas::Color(20, 20, 20);
+
+        s_splash.Show(splash_config, window.get());
+    }
 
     if (first_view.controller && !initial_url.is_empty())
         first_view.controller->load(initial_url);

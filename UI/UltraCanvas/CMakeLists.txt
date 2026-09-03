@@ -63,6 +63,11 @@ endforeach()
 
 add_subdirectory(UltraCanvasSources/UltraCanvas)
 
+# --- Product version, from the top of Docs/Ladybird/CHANGELOG.md ---
+# Parses the first changelog line into LADYBIRD_VERSION / LADYBIRD_VERSION_DATE; the splash
+# reads both. Keep them out of the source so releasing is one new changelog line, not two.
+include(${CMAKE_CURRENT_SOURCE_DIR}/UltraCanvasSources/cmake/UltraCanvasVersion.cmake)
+
 # --- The ladybird executable ---
 add_executable(ladybird main.cpp)
 target_sources(ladybird PRIVATE
@@ -79,6 +84,10 @@ target_sources(ladybird PRIVATE
     BrowserWindow.cpp
 )
 target_link_libraries(ladybird PRIVATE UltraCanvas)
+
+target_compile_definitions(ladybird PRIVATE
+    LADYBIRD_VERSION="${LADYBIRD_VERSION}"
+    LADYBIRD_VERSION_DATE="${LADYBIRD_VERSION_DATE}")
 
 create_ladybird_bundle(ladybird)
 
@@ -99,6 +108,31 @@ if (WIN32)
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_CURRENT_SOURCE_DIR}/UltraCanvasSources/media/fonts"
             "$<TARGET_FILE_DIR:ladybird>/Resources/media/fonts"
+        VERBATIM
+    )
+
+    # The splash / app-icon assets, resolved at runtime via GetResourcesDir() (= <exe_dir>/Resources/
+    # on Windows): the Ladybird mark and the UltraCanvas credit logo.
+    add_custom_command(TARGET ladybird POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/UltraCanvasSources/media/appicon"
+            "$<TARGET_FILE_DIR:ladybird>/Resources/media/appicon"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/UltraCanvasSources/media/images"
+            "$<TARGET_FILE_DIR:ladybird>/Resources/media/images"
+        VERBATIM
+    )
+elseif (UNIX AND NOT APPLE)
+    # Stage the splash / app-icon assets where GetResourcesDir() looks on Linux: it picks the first
+    # of <exe_dir>/share, <exe_dir>/../share, <exe_dir>/../share/UltraCanvas that contains media/,
+    # so copying them under <exe_dir>/share/media/ makes candidate 1 resolve to <exe_dir>/share/.
+    add_custom_command(TARGET ladybird POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/UltraCanvasSources/media/appicon"
+            "$<TARGET_FILE_DIR:ladybird>/share/media/appicon"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/UltraCanvasSources/media/images"
+            "$<TARGET_FILE_DIR:ladybird>/share/media/images"
         VERBATIM
     )
 endif()

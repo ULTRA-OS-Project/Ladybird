@@ -58,30 +58,19 @@ void setup_windows_debug_log(Main::Arguments& arguments)
             log_path = ByteString { "debug.log" };
     }
 
-    // 3) Point stdout/stderr at the log file — both the OS std handles (so inheriting child services
-    //    log here too) and the CRT fds (so dbgln/warnln, which write via _fileno(stderr), land here).
-    if (auto wide = to_wide_string(log_path->view()); !wide.is_error()) {
-        SECURITY_ATTRIBUTES security_attributes {};
-        security_attributes.nLength = sizeof(security_attributes);
-        security_attributes.bInheritHandle = TRUE;
+    // 3) Point stderr (AK's dbgln/warnln write there via _write(_fileno(stderr), ...)) at the log.
+    //    This is a GUI-subsystem (no console) build, so stderr has NO valid fd to _dup2 onto —
+    //    _fileno(stderr) is -2. freopen() reopens the FILE* itself onto the file, giving it a real
+    //    fd, which is the only thing that works here. Then mark the underlying handle inheritable and
+    //    install it as the process std handles so spawned services (WebContent, ...) log here too.
+    if (std::freopen(log_path->characters(), "w", stderr) != nullptr) {
+        std::setvbuf(stderr, nullptr, _IONBF, 0); // unbuffered: the last lines before a crash reach disk
 
-        HANDLE handle = CreateFileW(wide.value().data(), FILE_GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-            &security_attributes, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-
+        auto handle = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(stderr)));
         if (handle != INVALID_HANDLE_VALUE) {
-            SetStdHandle(STD_OUTPUT_HANDLE, handle);
+            SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
             SetStdHandle(STD_ERROR_HANDLE, handle);
-
-            // _open_osfhandle takes ownership of `handle`; keep the fd open for the process lifetime
-            // so `handle` (referenced by SetStdHandle and by the inherited children) stays valid.
-            int fd = _open_osfhandle(reinterpret_cast<intptr_t>(handle), _O_APPEND | _O_TEXT);
-            if (fd != -1) {
-                _dup2(fd, _fileno(stdout));
-                _dup2(fd, _fileno(stderr));
-            }
-            // Don't buffer, so the last lines before a crash actually reach disk.
-            setvbuf(stdout, nullptr, _IONBF, 0);
-            setvbuf(stderr, nullptr, _IONBF, 0);
+            SetStdHandle(STD_OUTPUT_HANDLE, handle);
         }
     }
 

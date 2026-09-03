@@ -60,6 +60,33 @@ done
 # 2) DLLs already staged next to the exe (vcpkg z-applocal + Ladybird's own lagom-*.dll).
 cp "$BUILD_DIR"/bin/*.dll "$DIST/bin/" 2>/dev/null || true
 
+# 2b) Runtime-loaded DLLs the import-table walk cannot see. ANGLE's GLES/EGL and the D3D shader
+#     compiler are LoadLibrary'd at runtime by Skia/WebContent (so they are NOT in any import table),
+#     and the MSVC C++ runtime is a redistributable that is present on a dev box but not necessarily
+#     on a clean target. Search vcpkg's bin, System32 and the VS redist for each; warn if not found.
+#     Done before the closure below so those DLLs' own dependencies get pulled in too.
+echo "Bundling runtime-loaded DLLs..."
+win_system32="$(cygpath -u "${SYSTEMROOT:-C:\\Windows}" 2>/dev/null)/System32"
+vs_crt_dir="$(ls -d "/c/Program Files"*"/Microsoft Visual Studio/"*"/"*"/VC/Redist/MSVC/"*"/x64/Microsoft.VC"*".CRT" 2>/dev/null | sort | tail -1)"
+extra_search_dirs=( "$VCPKG_BIN" "$win_system32" "/c/Windows/System32" "$vs_crt_dir" )
+extra_dlls=(
+    libEGL.dll libGLESv2.dll d3dcompiler_47.dll
+    vcruntime140.dll vcruntime140_1.dll msvcp140.dll msvcp140_1.dll msvcp140_2.dll concrt140.dll
+)
+for name in "${extra_dlls[@]}"; do
+    [ -f "$DIST/bin/$name" ] && continue
+    found=""
+    for d in "${extra_search_dirs[@]}"; do
+        if [ -n "$d" ] && [ -f "$d/$name" ]; then
+            cp "$d/$name" "$DIST/bin/"
+            echo "  runtime: $name"
+            found=1
+            break
+        fi
+    done
+    [ -z "$found" ] && echo "  (not found: $name — if the app needs it, install the VC++ Redistributable on the target or copy it manually)"
+done
+
 # 3) Transitive PE dependency closure, pulling any still-missing DLLs from vcpkg's bin. Repeats
 #    until a full pass adds nothing (objdump keeps every pass fast and hang-free).
 echo "Resolving DLL dependencies..."

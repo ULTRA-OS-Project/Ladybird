@@ -895,6 +895,11 @@ void SeccompPolicy::allow_file_descriptor_operations()
     SECCOMP_APPEND_ALLOW_SYSCALL_IF_DEFINED(*this, write);
     SECCOMP_APPEND_ALLOW_SYSCALL_IF_DEFINED(*this, close);
     SECCOMP_APPEND_ALLOW_SYSCALL_IF_DEFINED(*this, fstat);
+    // NB: glibc >= 2.33 removed the legacy fstat syscall and implements fstat(fd, buf) as
+    //     newfstatat(fd, "", buf, AT_EMPTY_PATH) (and statx on some paths), so fstat-by-fd
+    //     traps SIGSYS unless these are allowed. Path-based stat stays blocked by Landlock.
+    SECCOMP_APPEND_ALLOW_SYSCALL_IF_DEFINED(*this, newfstatat);
+    SECCOMP_APPEND_ALLOW_SYSCALL_IF_DEFINED(*this, statx);
     SECCOMP_APPEND_ALLOW_SYSCALL_IF_DEFINED(*this, dup);
     SECCOMP_APPEND_ALLOW_SYSCALL_IF_DEFINED(*this, dup3);
     SECCOMP_APPEND_ALLOW_SYSCALL_IF_DEFINED(*this, pipe2);
