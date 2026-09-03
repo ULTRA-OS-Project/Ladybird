@@ -63,10 +63,21 @@ endforeach()
 
 add_subdirectory(UltraCanvasSources/UltraCanvas)
 
-# --- Product version, from the top of Docs/Ladybird/CHANGELOG.md ---
-# Parses the first changelog line into LADYBIRD_VERSION / LADYBIRD_VERSION_DATE; the splash
-# reads both. Keep them out of the source so releasing is one new changelog line, not two.
-include(${CMAKE_CURRENT_SOURCE_DIR}/UltraCanvasSources/cmake/UltraCanvasVersion.cmake)
+# --- Product version, from the first line of the port's own Docs/CHANGELOG.md ---
+# Format: `#### YYYY-MM-DD *x.y.z*`. Parsed here rather than via the vendor's
+# UltraCanvasVersion.cmake so the port's version lives with the port and not in the
+# UltraCanvasSources submodule. Keep the number out of the source: releasing is one new
+# changelog line, which both LADYBIRD_VERSION and LADYBIRD_VERSION_DATE (the splash) follow.
+set(_ladybird_changelog "${CMAKE_CURRENT_SOURCE_DIR}/Docs/CHANGELOG.md")
+file(STRINGS "${_ladybird_changelog}" _ladybird_first_line LIMIT_COUNT 1)
+string(REGEX MATCH "^#### ([0-9]+-[0-9]+-[0-9]+) \\*([0-9]+(\\.[0-9]+)*)\\*" _m "${_ladybird_first_line}")
+if(NOT _m)
+    message(FATAL_ERROR "Ladybird version: could not parse '#### YYYY-MM-DD *x.y.z*' from\n  ${_ladybird_changelog}\n  got: ${_ladybird_first_line}")
+endif()
+set(LADYBIRD_VERSION "${CMAKE_MATCH_2}")
+set(LADYBIRD_VERSION_DATE "${CMAKE_MATCH_1}")
+# Re-run configure when a release is added at the top of the changelog.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_ladybird_changelog}")
 
 # --- The ladybird executable ---
 add_executable(ladybird main.cpp)
@@ -112,10 +123,12 @@ if (WIN32)
     )
 
     # The splash / app-icon assets, resolved at runtime via GetResourcesDir() (= <exe_dir>/Resources/
-    # on Windows): the Ladybird mark and the UltraCanvas credit logo.
+    # on Windows). The Ladybird mark is port-owned (res/appicon); the UltraCanvas credit logo is the
+    # shared framework asset from the vendor tree. Both are staged under media/ so the runtime paths
+    # (media/appicon, media/images) are the same on every platform.
     add_custom_command(TARGET ladybird POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_CURRENT_SOURCE_DIR}/UltraCanvasSources/media/appicon"
+            "${CMAKE_CURRENT_SOURCE_DIR}/res/appicon"
             "$<TARGET_FILE_DIR:ladybird>/Resources/media/appicon"
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_CURRENT_SOURCE_DIR}/UltraCanvasSources/media/images"
@@ -128,7 +141,7 @@ elseif (UNIX AND NOT APPLE)
     # so copying them under <exe_dir>/share/media/ makes candidate 1 resolve to <exe_dir>/share/.
     add_custom_command(TARGET ladybird POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_CURRENT_SOURCE_DIR}/UltraCanvasSources/media/appicon"
+            "${CMAKE_CURRENT_SOURCE_DIR}/res/appicon"
             "$<TARGET_FILE_DIR:ladybird>/share/media/appicon"
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_CURRENT_SOURCE_DIR}/UltraCanvasSources/media/images"

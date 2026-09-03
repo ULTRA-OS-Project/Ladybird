@@ -1758,7 +1758,7 @@ void open_browser_window(WebViewHandle const& first_view, StringView initial_url
 
     // Splash screen: shown once, on the first window, parented to it so it lands on the same
     // monitor. It times itself out after two seconds (or closes on click) once the event loop
-    // runs. See Docs/Ladybird/SplashScreen.md. If the image can't be loaded Show() no-ops and
+    // runs. See Docs/SplashScreen.md. If the image can't be loaded Show() no-ops and
     // the browser starts normally.
     if (!s_splash_shown) {
         s_splash_shown = true;
