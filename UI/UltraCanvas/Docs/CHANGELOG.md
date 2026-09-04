@@ -1,4 +1,4 @@
-#### 2026-08-28 *0.1.0*
+#### 2026-08-28 *1.0*
 - **First tracked version of the Ladybird port.** Ladybird-driven work has been
   landing in this repository for a while with nowhere to record it — the most
   recent example changed two framework files to fix a Ladybird compile and

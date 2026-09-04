@@ -1264,8 +1264,8 @@ void open_browser_window(WebViewHandle const& first_view, StringView initial_url
 
     UltraCanvas::WindowConfig config;
     config.title = is_private ? "Ladybird (Private)" : "Ladybird";
-    config.width = 1024;
-    config.height = 768;
+    config.width = 950;
+    config.height = 750;
     // The Ladybird mark doubles as the window / taskbar icon (transparent outside the disc).
     config.iconPath = UltraCanvas::NormalizePath(UltraCanvas::GetResourcesDir() + "media/appicon/Ladybird.png");
 
@@ -1766,10 +1766,10 @@ void open_browser_window(WebViewHandle const& first_view, StringView initial_url
         UltraCanvas::SplashScreenConfig splash_config;
         splash_config.width       = 440;
         splash_config.height      = 640;
-        splash_config.showTimeout = 2000; // two seconds, then it closes itself
+        splash_config.showTimeout = 5000; // 5 seconds, then it closes itself
 
         splash_config.imagePath     = UltraCanvas::NormalizePath(UltraCanvas::GetResourcesDir() + "media/appicon/Ladybird.png");
-        splash_config.logoSize      = 250;
+        splash_config.logoSize      = 150;
         splash_config.title         = "Ladybird";
         splash_config.titleFontSize = 28;
         splash_config.version       = LADYBIRD_VERSION;      // rendered as "Version 0.1.0"
