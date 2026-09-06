@@ -1,6 +1,8 @@
 *.swo
 *.swp
 *.config
+# Generated self-signed code-signing key (see UI/UltraCanvas/sign-win.ps1)
+*.pfx
 *.creator
 *.creator.user
 *.creator.user.*

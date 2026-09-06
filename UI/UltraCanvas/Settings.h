@@ -18,7 +18,7 @@ namespace Ladybird {
 struct WindowGeometry {
     int x { -1 }; // -1 => let the window system position the window
     int y { -1 };
-    int width { 1024 };
+    int width { 950 };
     int height { 768 };
     bool maximized { false };
 };

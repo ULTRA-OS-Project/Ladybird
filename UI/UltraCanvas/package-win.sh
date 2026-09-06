@@ -108,6 +108,46 @@ while : ; do
 done
 echo "  $(find "$DIST/bin" -maxdepth 1 -name '*.dll' | wc -l) DLLs bundled"
 
+# 3b) Authenticode code signing (via sign-win.ps1). Unsigned, zero-reputation helper exes
+#     (notably ImageDecoder.exe, which does IPC handle duplication into a peer process) get
+#     flagged by heuristic AV as false positives (e.g. AVG "IDP.Generic"). By default this
+#     signs with a SELF-SIGNED "Cloverleaf UG" placeholder cert so the pipeline is complete;
+#     that does NOT clear AV/SmartScreen on other machines — swap in a real CA cert for the
+#     actual fix by setting SIGN_THUMBPRINT or SIGN_PFX (they take precedence automatically).
+#       SIGN_THUMBPRINT      SHA1 thumbprint of a real cert in the Windows store (EV tokens)
+#       SIGN_PFX / SIGN_PFX_PASSWORD   path + password of a real .pfx/.p12 file cert (OV)
+#       SIGN_TIMESTAMP_URL   RFC3161 timestamp server (default DigiCert)
+#       SIGN_DLLS=1          also sign our own lagom-*.dll (third-party vcpkg DLLs are left as-is)
+#       SIGN=none            skip signing entirely (produce an unsigned zip)
+sign_binaries() {
+    if [ "$SIGN" = "none" ]; then
+        echo "Skipping code signing (SIGN=none) — binaries will be unsigned."
+        return 0
+    fi
+
+    if ! command -v powershell.exe >/dev/null 2>&1; then
+        echo "Warning: powershell.exe not found — skipping code signing (binaries will be unsigned)." >&2
+        return 0
+    fi
+
+    local ps1 win_bindir
+    ps1="$(cygpath -w "$REPO_ROOT/UI/UltraCanvas/sign-win.ps1")"
+    win_bindir="$(cygpath -w "$DIST/bin")"
+
+    local -a ps_args=( -BinDir "$win_bindir" )
+    [ -n "$SIGN_THUMBPRINT" ]    && ps_args+=( -Thumbprint "$SIGN_THUMBPRINT" )
+    [ -n "$SIGN_PFX" ]          && ps_args+=( -PfxPath "$(cygpath -w "$SIGN_PFX")" )
+    [ -n "$SIGN_PFX_PASSWORD" ] && ps_args+=( -PfxPassword "$SIGN_PFX_PASSWORD" )
+    [ -n "$SIGN_TIMESTAMP_URL" ] && ps_args+=( -TimestampUrl "$SIGN_TIMESTAMP_URL" )
+    [ "$SIGN_DLLS" = "1" ]      && ps_args+=( -SignDlls )
+
+    echo "Code signing binaries via sign-win.ps1..."
+    # set -e aborts the whole package run if signing fails with a real cert, so a misconfigured
+    # cert never silently ships unsigned.
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$ps1" "${ps_args[@]}"
+}
+sign_binaries
+
 # 4) Resources. Ladybird resolves these as <exe>/../share/Lagom on Windows, so mirror share/Lagom
 #    next to bin/. This carries the toolbar icons, fonts, themes, about-pages and ladybird/ assets.
 echo "Copying resources (share/Lagom)..."
