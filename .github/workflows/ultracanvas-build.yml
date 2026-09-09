@@ -1,0 +1,251 @@
+name: UltraCanvas Build
+
+# Release-artifact workflow for the UltraCanvas frontend of Ladybird, modeled on the
+# UltraCanvas project's own build.yml but adapted to Ladybird's build system (vcpkg +
+# CMake presets + Meta/ladybird.py). It runs on free GitHub-hosted runners (unlike the
+# main ci.yml / lagom-template.yml, which need the private Blacksmith runners and the
+# ladybirdbrowser/ladybird-ci container), builds the `ladybird` target with
+# -DLADYBIRD_GUI_FRAMEWORK=UltraCanvas, packages it with the fork's package-*.sh scripts,
+# and uploads the resulting zips as artifacts.
+#
+# Heads-up: a full browser build plus its vcpkg dependency tree (skia/angle/ffmpeg/...) is
+# heavy. Cold-cache runs are slow and disk-tight on free runners (Windows especially); the
+# ccache + vcpkg binary cache (see cache-restore/cache-save below) make later runs faster.
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  workflow_dispatch:
+
+# Supersede in-flight runs for the same ref when newer commits arrive, except on master and
+# release tags (those produce the artifacts we keep).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' && !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    name: ${{ matrix.os }} (${{ matrix.arch_label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ----- Reliable rows: fully wired-up build + packaging -----
+          - os: ubuntu-22.04
+            os_name: Linux
+            arch: x86_64
+            arch_label: x86_64
+            toolchain: Clang
+            experimental: false
+          # Linux/arm64 on GitHub-hosted arm64 runners. Same 22.04 base as x86_64, so both
+          # Linux artifacts share a glibc floor and the dependency install is identical.
+          - os: ubuntu-22.04-arm
+            os_name: Linux
+            arch: arm64
+            arch_label: arm64
+            toolchain: Clang
+            experimental: false
+          - os: windows-latest
+            os_name: Windows
+            arch: x86_64
+            arch_label: x86_64
+            toolchain: ClangCL
+            experimental: false
+
+          # ----- Best-effort rows: allowed to fail without blocking the release -----
+          # macOS has no package-macos.sh in this fork, and the UltraCanvas frontend is
+          # untested on macOS (AppKit is the natively-supported macOS frontend). We build
+          # UltraCanvas for parity and package with a minimal inline `cmake --install` + zip.
+          - os: macos-latest
+            os_name: macOS
+            arch: arm64
+            arch_label: arm64
+            toolchain: Clang
+            experimental: true
+          - os: macos-15-intel
+            os_name: macOS
+            arch: x86_64
+            arch_label: x86_64
+            toolchain: Clang
+            experimental: true
+          # Windows-on-ARM: the Windows CMake preset is x64-only (see
+          # Meta/CMake/presets/CMakeWindowsPresets.json), so there is no arm64 triplet yet.
+          # Kept here as an experimental placeholder; making it real needs a new arm64 preset.
+          - os: windows-11-arm
+            os_name: Windows
+            arch: arm64
+            arch_label: arm64
+            toolchain: ClangCL
+            experimental: true
+
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+
+    # Full browser + vcpkg builds are slow on free runners; cap well above the ~30-90 min a
+    # warm-cache run takes so a hang can't burn the default 6-hour timeout.
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          # Full history: GitRepositoryTest walks this repo's own commits and fails under a
+          # shallow checkout (matches the main Ladybird CI's rationale).
+          fetch-depth: 0
+
+      - name: Extract version from changelog
+        shell: bash
+        run: |
+          VERSION=$(sed -nE '1s/^#### [0-9-]+ \*([0-9]+(\.[0-9]+)*)\*.*/\1/p' UI/UltraCanvas/Docs/CHANGELOG.md)
+          if [ -z "$VERSION" ]; then
+            echo "Error: could not parse version from UI/UltraCanvas/Docs/CHANGELOG.md (expected '#### YYYY-MM-DD *x.y*')" >&2
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      # ===== Linux: system deps + a modern toolchain =====
+      # ubuntu-22.04's stock gcc (11) and cmake (3.22) are too old for Ladybird's C++23 /
+      # CMake 3.30 requirement, so install CMake from Kitware and clang-21 from apt.llvm.org
+      # (both per Documentation/BuildInstructionsLadybird.md). Runs BEFORE the setup action
+      # so its build_vcpkg.py bootstrap has a working toolchain. Shared by both Linux rows.
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf autoconf-archive automake build-essential ccache curl \
+            fonts-liberation2 git glslang-tools libdrm-dev libgl1-mesa-dev \
+            libncurses-dev libpulse-dev libtool nasm ninja-build pkg-config \
+            python3-venv tar unzip zip ca-certificates gnupg lsb-release wget
+
+          # CMake >= 3.30 from Kitware's apt repository.
+          wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null \
+            | gpg --dearmor - | sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
+          echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ $(lsb_release -sc) main" \
+            | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
+
+          # clang-21 from LLVM's apt repository.
+          wget -O /usr/share/keyrings/llvm-snapshot.gpg.key https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo cp /usr/share/keyrings/llvm-snapshot.gpg.key /etc/apt/trusted.gpg.d/llvm.asc
+          echo "deb [signed-by=/etc/apt/trusted.gpg.d/llvm.asc] https://apt.llvm.org/$(lsb_release -sc)/ llvm-toolchain-$(lsb_release -sc)-21 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm.list >/dev/null
+
+          sudo apt-get update
+          sudo apt-get install -y cmake clang-21 clang++-21 lld-21 || \
+            sudo apt-get install -y cmake clang-21 lld-21
+          clang-21 --version
+          cmake --version
+
+      # ===== Shared tooling: python deps, vcpkg bootstrap, and the macOS/Windows toolchain.
+      # On Windows (ClangCL) this installs/locates clang-cl; on macOS it installs the brew
+      # llvm/ninja/rust toolchain and selects Xcode. On Linux it only bootstraps vcpkg (the
+      # step above already installed the system toolchain). =====
+      - name: Setup
+        id: setup
+        uses: ./.github/actions/setup
+        with:
+          os: ${{ matrix.os_name }}
+          arch: ${{ matrix.arch }}
+          toolchain: ${{ matrix.toolchain }}
+
+      # ===== Restore ccache + vcpkg binary cache (keyed on vcpkg.json). Critical for build
+      # time on free runners. =====
+      - name: Restore caches
+        id: cache-restore
+        uses: ./.github/actions/cache-restore
+        with:
+          os: ${{ matrix.os_name }}
+          arch: ${{ matrix.arch }}
+          toolchain: ${{ matrix.toolchain }}
+          cache_key_extra: UltraCanvas
+          ccache_path: ${{ steps.setup.outputs.ccache_path }}
+          vcpkg_cache_path: ${{ steps.setup.outputs.vcpkg_cache_path }}
+
+      # ===== Configure & build the UltraCanvas frontend =====
+      # Meta/ladybird.py is the fork's documented build entry point (see the header of
+      # UI/UltraCanvas/package-win.sh). It selects the Release preset, ensures vcpkg deps,
+      # and builds into Build/release. The `ladybird` target pulls in the helper services
+      # (WebContent/RequestServer/ImageDecoder/WebWorker/Compositor) the package scripts bundle.
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python Meta/ladybird.py build --gui UltraCanvas ladybird
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python3 Meta/ladybird.py build --gui UltraCanvas --cc clang-21 --cxx clang++-21 ladybird
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          python3 Meta/ladybird.py build --gui UltraCanvas ladybird
+
+      # ===== Save caches (only for the refs whose artifacts we keep) =====
+      - name: Save caches
+        if: ${{ github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/') }}
+        uses: ./.github/actions/cache-save
+        with:
+          arch: ${{ matrix.arch }}
+          ccache_path: ${{ steps.setup.outputs.ccache_path }}
+          ccache_primary_key: ${{ steps.cache-restore.outputs.ccache_primary_key }}
+          vcpkg_cache_path: ${{ steps.setup.outputs.vcpkg_cache_path }}
+          vcpkg_cache_primary_key: ${{ steps.cache-restore.outputs.vcpkg_cache_primary_key }}
+
+      # ===== Package =====
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: BUILD_DIR="$PWD/Build/release" ./UI/UltraCanvas/package-linux.sh
+
+      # package-win.sh runs under Git-Bash (preinstalled as `bash` on the Windows runner) and
+      # self-signs the binaries via sign-win.ps1 by default (reduces AV false positives). To
+      # sign with a real certificate instead, add SIGN_PFX (base64) / SIGN_PFX_PASSWORD repo
+      # secrets and wire them here.
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: BUILD_DIR=Build/release ./UI/UltraCanvas/package-win.sh
+
+      # No package-macos.sh exists in this fork yet, so assemble a minimal distribution from
+      # the install rules (UI/cmake/InstallRules.cmake) and zip it. Best-effort.
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -eux
+          rm -rf dist/Ladybird
+          cmake --install Build/release --prefix "$PWD/dist/Ladybird"
+          ( cd dist && zip -ry "../Ladybird-macOS-${{ matrix.arch_label }}-${VERSION}.zip" Ladybird )
+
+      # ===== Upload artifacts =====
+      - name: Upload build artifacts (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v6
+        with:
+          name: Ladybird-Linux-${{ env.VERSION }}-${{ matrix.arch_label }}
+          path: Ladybird-Linux-*.zip
+          retention-days: 7
+
+      - name: Upload build artifacts (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v6
+        with:
+          name: Ladybird-Windows-${{ env.VERSION }}-${{ matrix.arch_label }}
+          path: Ladybird-Windows-*.zip
+          retention-days: 7
+
+      - name: Upload build artifacts (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v6
+        with:
+          name: Ladybird-macOS-${{ env.VERSION }}-${{ matrix.arch_label }}
+          path: Ladybird-macOS-*.zip
+          retention-days: 7

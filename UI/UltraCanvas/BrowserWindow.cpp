@@ -1562,9 +1562,9 @@ void open_browser_window(WebViewHandle const& first_view, StringView initial_url
         window->AddChild(tab_preview);
     }
 
-    window->onWindowResize = [self](int, int) { if (auto s = self.lock()) { s->relayout(); s->capture_window_geometry(); } };
+    window->onWindowResize = [self](int, int) { if (auto s = self.lock()) { s->relayout(); s->capture_window_geometry(); save_window_geometry(s->window_geometry); } };
     window->onWindowMove = [self](int, int) { if (auto s = self.lock()) s->capture_window_geometry(); };
-    window->onWindowMaximize = [self] { if (auto s = self.lock()) { s->capture_window_geometry(); save_window_geometry(s->window_geometry); } };
+    window->onWindowMaximize = [self] { if (auto s = self.lock()) { s->capture_window_geometry(); } };
     window->onWindowRestore = [self] { if (auto s = self.lock()) { s->capture_window_geometry(); save_window_geometry(s->window_geometry); } };
     window->onWindowFocus = [self] { s_active_window = self; };
     window->onWindowClosed = [self] {
