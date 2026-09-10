@@ -140,6 +140,43 @@ jobs:
           clang-21 --version
           cmake --version
 
+          MULTIARCH=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null \
+            || gcc -print-multiarch)
+          echo "Building Linux dependencies for $MULTIARCH ($(uname -m))"
+          sudo apt-get install -y libcairo2-dev libpango1.0-dev libharfbuzz-dev
+          sudo apt-get install -y libvips-dev libglib2.0-dev libfreetype6-dev
+          sudo apt-get install -y libtinyxml2-dev libfmt-dev
+          sudo apt-get install -y libx11-dev libxcursor-dev libgl1-mesa-dev libgtk-3-dev
+          sudo apt-get install -y libcdr-dev librevenge-dev zlib1g-dev
+          sudo apt-get install -y libzbar-dev
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # The GitHub macOS runner image pre-taps aws/tap (for aws-sam-cli).
+          # Homebrew's tap-trust check prints a multi-line "not trusted"
+          # warning on *every* brew invocation while it is present. We install
+          # nothing from it, so drop the tap — that is Homebrew's own first
+          # suggestion, and it is preferable to `brew trust aws/tap` (grants
+          # blanket trust to a tap we never use) or
+          # HOMEBREW_NO_REQUIRE_TAP_TRUST=1 (deprecated, disables the check
+          # for taps we *do* use). Tolerate the tap being absent so a future
+          # runner image that drops it cannot fail this step.
+          brew untap aws/tap 2>/dev/null || true
+          brew install cmake pkg-config
+          brew install cairo pango harfbuzz vips glib freetype tinyxml2
+          brew install libcdr librevenge
+          brew install zbar
+          brew install mupdf
+          brew install c-ares
+          brew install libsodium
+          brew install leptonica tesseract
+          # Optional audio codecs (FLAC/OGG/Opus/MP3 encode, OGG/Opus decode)
+          brew install flac libvorbis opus opusfile libopusenc lame
+          # libcurl: use Apple's system libcurl (SecureTransport-family
+          # backend) — already present on every macOS install, so we add
+          # no extra dependency for UltraNet on this platform.
+
       # ===== Shared tooling: python deps, vcpkg bootstrap, and the macOS/Windows toolchain.
       # On Windows (ClangCL) this installs/locates clang-cl; on macOS it installs the brew
       # llvm/ninja/rust toolchain and selects Xcode. On Linux it only bootstraps vcpkg (the
